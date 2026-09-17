@@ -1,0 +1,8 @@
+# Secrets never enter this repository
+.env*
+!.env.example
+.secrets/
+*.token
+
+# Local Claude Code state
+.claude/settings.local.json
