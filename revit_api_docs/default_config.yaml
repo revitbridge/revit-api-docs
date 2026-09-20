@@ -1,0 +1,85 @@
+# Bundled defaults for revit-api-docs.
+#
+# The MCP server needs no config file: everything a user may change comes from
+# environment variables (see README, "Configure"), which config.py layers on
+# top of this file. The offline pipeline tools (pipeline/ in the repository)
+# may point REVIT_API_DOCS_CONFIG at a copy of this file with edited llm/sdk
+# sections. API keys are never written here, only the environment variable
+# that holds them.
+
+revit_version: "2026"
+
+# HTTP proxy for outbound API calls (HTTPS_PROXY / HTTP_PROXY take precedence).
+proxy:
+  enabled: false
+  http: ""
+  https: ""
+
+openrouter:
+  base_url: "https://openrouter.ai/api/v1"
+  api_key_env: "OPENROUTER_API_KEY"
+
+# --- LLM (pipeline tools and optional query rewriting only) ---
+llm:
+  provider: "claude"
+  models:
+    claude:
+      model: "anthropic/claude-sonnet-4.6"
+      api_key_env: "OPENROUTER_API_KEY"
+      base_url: "https://openrouter.ai/api/v1"
+    gemini:
+      model: "google/gemini-3-flash-preview"
+      api_key_env: "OPENROUTER_API_KEY"
+      base_url: "https://openrouter.ai/api/v1"
+    gemini_flash:
+      model: "google/gemini-3-flash-preview"
+      api_key_env: "OPENROUTER_API_KEY"
+      base_url: "https://openrouter.ai/api/v1"
+    deepseek:
+      model: "deepseek/deepseek-chat-v3-0324"
+      api_key_env: "OPENROUTER_API_KEY"
+      base_url: "https://openrouter.ai/api/v1"
+  temperature: 0.3
+  max_tokens: 16384
+
+# --- Embedding (query time) ---
+# The shipped vector store was built with openai/text-embedding-3-large
+# (3072 dimensions) through OpenRouter. Queries must use the same model or
+# vector search returns noise; keyword search works without any key.
+embedding:
+  provider: "openai"
+  models:
+    openai:
+      model: "openai/text-embedding-3-large"
+      dimension: 3072
+      api_key_env: "REVIT_API_DOCS_EMBEDDING_API_KEY"
+      base_url: "https://openrouter.ai/api/v1"
+    google:
+      model: "text-embedding-004"
+      dimension: 768
+      api_key_env: "GOOGLE_API_KEY"
+
+# --- Rerank (optional; Cohere native REST API, skipped without the key) ---
+rerank:
+  enabled: true
+  provider: "cohere"
+  models:
+    cohere:
+      model: "rerank-v3.5"
+      api_key_env: "COHERE_API_KEY"
+
+# --- Retrieval ---
+retrieval:
+  api:
+    top_k: 30          # candidates fetched before rerank
+    rerank_top_n: 15   # default number returned
+  code:
+    top_k: 5
+    rerank_top_n: 3
+
+# --- SDK sample extraction (pipeline/sdk_parser) ---
+sdk:
+  stage1_provider: "gemini_flash"   # README parsing (cheap + fast)
+  stage2_provider: "claude"         # golden code generation (quality)
+  num_workers_phase1: 10
+  num_workers_phase2: 5

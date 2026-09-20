@@ -1,0 +1,40 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    # Data releases are tagged v<major>.<minor>-data and carry no package.
+    if: ${{ !endsWith(github.ref_name, '-data') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag must match the package version
+        run: |
+          expected="v$(uv version --short)"
+          if [ "${GITHUB_REF_NAME}" != "${expected}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${expected}" && exit 1
+          fi
+      - run: uv sync
+      - run: uv run pytest
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI Trusted Publishing (no API token stored)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

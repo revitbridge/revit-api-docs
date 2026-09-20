@@ -4,5 +4,18 @@
 .secrets/
 *.token
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Local data set copies and pipeline output (the data set ships as a GitHub Release)
+data/
+out/
+
 # Local Claude Code state
 .claude/settings.local.json
