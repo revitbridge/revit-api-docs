@@ -90,8 +90,9 @@ class RAGRetriever:
         from .embedder.providers import create_embedding
         try:
             self._embedder = create_embedding(config)
-        except (KeyError, ValueError, ImportError) as e:
-            # No key / unsupported provider: keyword search only.
+        except (KeyError, ValueError, ImportError, NotImplementedError) as e:
+            # No key / unknown provider / provider not implemented (local_hf,
+            # zhipu) / SDK not installed: keyword search only.
             self._log.warning(f"embedding disabled ({e}); vector search is off, "
                               "keyword search on SQLite only")
             self._embedder = None

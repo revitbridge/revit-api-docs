@@ -268,3 +268,27 @@ def test_api_top_k_zero_skips_the_api_collection(vector_retriever):
     assert r._api_collection.calls == []
     assert r._code_collection.calls == [r._code_top_k]
     assert results.api_items == [] and len(results.sdk_items) == 2
+
+
+# ── provider selection failures degrade, as documented ──────────────────────
+
+@pytest.mark.parametrize("provider, reason", [
+    ("local_hf", "not implemented"),
+    ("zhipu", "not implemented"),
+    ("nope", "unsupported embedding provider"),
+])
+def test_unavailable_provider_degrades_to_keyword_search(tiny_dbs, monkeypatch, tmp_path, caplog, provider, reason):
+    api_db, sdk_db = tiny_dbs
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("REVIT_API_DOCS_EMBEDDING_PROVIDER", provider)
+    cfg = cfgmod.load_config()
+    cfg["embedding"]["models"].setdefault(provider, {"model": "x"})
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+
+    r = RAGRetriever(cfg, str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+
+    assert r.vector_search_enabled is False
+    assert "embedding disabled" in caplog.text and reason in caplog.text
+    names = [i.name for i in r.search("Wall.Create", api_top_k=2, code_top_k=0, rewrite=False).api_items]
+    assert names[0] == "Wall.Create Method"
