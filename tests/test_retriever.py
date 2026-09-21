@@ -173,3 +173,54 @@ def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeyp
     assert [i.name for i in results.api_items][0] == "Floor.Create Method"
     # the window is a cap on ranked rows, not a scan limit
     assert len(r._keyword_candidates(r._normalize_search_tokens("floor"))) == 50
+
+
+# ── lazy collection opening under concurrency ───────────────────────────────
+
+def test_open_collections_is_thread_safe(keyword_only_retriever, monkeypatch):
+    """Two first queries in parallel worker threads must open each collection
+    once and never observe one collection set while the other is still None."""
+    import sys
+    import threading
+    import time
+    import types
+
+    opened: list[str] = []
+
+    class _Collection:
+        def __init__(self, name):
+            self.name = name
+
+    class _Client:
+        def __init__(self, path, settings=None):
+            self.path = path
+
+        def get_collection(self, name):
+            time.sleep(0.05)  # widen the race window
+            opened.append(name)
+            return _Collection(name)
+
+    fake = types.ModuleType("chromadb")
+    fake.PersistentClient = _Client
+    fake_config = types.ModuleType("chromadb.config")
+    fake_config.Settings = lambda **kw: kw
+    fake.config = fake_config
+    monkeypatch.setitem(sys.modules, "chromadb", fake)
+    monkeypatch.setitem(sys.modules, "chromadb.config", fake_config)
+
+    r = keyword_only_retriever
+    seen: list[tuple[object, object]] = []
+
+    def first_query():
+        r._open_collections()
+        seen.append((r._api_collection, r._code_collection))
+
+    threads = [threading.Thread(target=first_query) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert opened == ["revit_api", "revit_sdk"]  # each collection opened exactly once
+    assert all(a is not None and c is not None for a, c in seen)
+    assert {c.name for _, c in seen} == {"revit_sdk"} and {a.name for a, _ in seen} == {"revit_api"}

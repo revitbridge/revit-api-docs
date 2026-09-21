@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -109,6 +110,7 @@ class RAGRetriever:
         self._chromadb_code_dir = chromadb_code_dir
         self._api_collection = None
         self._code_collection = None
+        self._collections_lock = threading.Lock()
         if self._embedder is not None:
             for label, d in [("api", chromadb_api_dir), ("code", chromadb_code_dir)]:
                 if not os.path.isdir(d):
@@ -157,21 +159,31 @@ class RAGRetriever:
         self._reranker_initialized = False
 
     def _open_collections(self) -> None:
-        """Open both ChromaDB collections (slow import, done once, lazily)."""
-        if self._api_collection is not None:
-            return
-        import chromadb
-        from chromadb.config import Settings
+        """Open both ChromaDB collections (slow import, done once, lazily).
 
-        settings = Settings(anonymized_telemetry=False)
-        self._api_collection = (
-            chromadb.PersistentClient(path=self._chromadb_api_dir, settings=settings)
-            .get_collection("revit_api")
-        )
-        self._code_collection = (
-            chromadb.PersistentClient(path=self._chromadb_code_dir, settings=settings)
-            .get_collection("revit_sdk")
-        )
+        Tool calls run in worker threads, so two first queries can race here;
+        the lock makes the second one wait instead of seeing one collection
+        set and the other still None. Both are published together, after the
+        second open succeeded.
+        """
+        if self._code_collection is not None:
+            return
+        with self._collections_lock:
+            if self._code_collection is not None:
+                return
+            import chromadb
+            from chromadb.config import Settings
+
+            settings = Settings(anonymized_telemetry=False)
+            api = (
+                chromadb.PersistentClient(path=self._chromadb_api_dir, settings=settings)
+                .get_collection("revit_api")
+            )
+            code = (
+                chromadb.PersistentClient(path=self._chromadb_code_dir, settings=settings)
+                .get_collection("revit_sdk")
+            )
+            self._api_collection, self._code_collection = api, code
 
     @property
     def vector_search_enabled(self) -> bool:
