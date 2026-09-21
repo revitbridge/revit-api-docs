@@ -72,7 +72,7 @@ def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
     api_db, sdk_db = tiny_dbs
     r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
     text = server.search_api(r, "Wall.Create", 5)
-    assert text.startswith("### M:Autodesk.Revit.DB.Wall.Create(")
+    assert text.startswith("### Wall.Create" + chr(10))
     text = server.search_examples(r, "wall", 2)
     assert "Project: CreateWall" in text
     assert server.search_api(r, "qqqq", 5).startswith("No API entries found")
@@ -115,7 +115,7 @@ async def test_stdio_round_trip_with_keyword_only_data(tiny_dbs, tmp_path):
                 if text.startswith("###"):
                     break
                 await asyncio.sleep(0.2)
-            assert text.startswith("### M:Autodesk.Revit.DB.Wall.Create(")
+            assert text.startswith("### Wall.Create" + chr(10))
 
             res = await session.call_tool("get_code_examples", {"query": "wall"})
             assert "Project: CreateWall" in res.content[0].text

@@ -676,6 +676,15 @@ class RAGRetriever:
                     name_parts = re.split(r'[.\s(]', name_l)
                     if any(part == token or part.startswith(token) for part in name_parts):
                         score += 3.0 * tw
+                    # Dotted tokens ("wall.create") never equal a segment; compare
+                    # them with the identifier before the first space or "(" so
+                    # Wall.Create and its overloads outrank Wall.CreateProfileSketch.
+                    if "." in token:
+                        head = re.split(r"[\s(]", name_l, 1)[0]
+                        if head == token:
+                            score += 6.0 * tw
+                        elif head.startswith(token):
+                            score += 2.0 * tw
                 # full_id match (less weight since full_id often contains namespace)
                 elif token in fid_l:
                     score += 1.5 * tw

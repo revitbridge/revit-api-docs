@@ -25,13 +25,13 @@ def test_keyword_only_mode_without_key(keyword_only_retriever, caplog):
     assert r._api_collection is None  # chromadb never opened
 
 
-def test_search_wall_create_hits_the_method_first(keyword_only_retriever):
+def test_search_wall_create_ranks_exact_identifier_first(keyword_only_retriever):
     results = keyword_only_retriever.search("Wall.Create", api_top_k=5, code_top_k=0, rewrite=False)
     names = [i.name for i in results.api_items]
-    assert names and names[0].startswith("Wall.Create(")
+    # exact identifier (overview + overloads) before the longer Wall.CreateProfileSketch
+    assert names[:2] == ["Wall.Create Method", "Wall.Create(Document, Curve, ElementId, Boolean) Method"]
+    assert names.index("Wall.CreateProfileSketch Method") > 1
     assert results.sdk_items == []
-    # "Create" is a token too, but the floor method must rank below the wall one
-    assert any(n.startswith("Floor.Create") for n in names[1:]) or len(names) == 1
 
 
 def test_top_k_zero_skips_a_source(keyword_only_retriever):
@@ -48,10 +48,11 @@ def test_sdk_keyword_fallback_matches_project_and_apis(keyword_only_retriever):
 
 def test_build_context_formats_api_and_code(keyword_only_retriever):
     r = keyword_only_retriever
-    results = r.search("Wall.Create", api_top_k=1, code_top_k=1, rewrite=False)
+    results = r.search("Wall.Create", api_top_k=2, code_top_k=1, rewrite=False)
     ctx = r.build_context(results)
-    assert ctx["api_context"].startswith("### M:Autodesk.Revit.DB.Wall.Create(")
-    assert "Syntax: public static Wall Create(" in ctx["api_context"]
+    assert ctx["api_context"].startswith("### Wall.Create" + chr(10) + "Creates a wall within the project")
+    assert chr(10) * 2 + "### M:Autodesk.Revit.DB.Wall.Create(" in ctx["api_context"]
+    assert "Syntax: public static Wall Create(Document document" in ctx["api_context"]
     assert "Parameters: document:" in ctx["api_context"]
     assert ctx["code_context"].startswith("// Project: CreateWall  |  APIs: [")
     assert "Wall.Create(doc, line, levelId, false)" in ctx["code_context"]
@@ -133,7 +134,7 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
 
     for _ in range(3):
         results = r.search("Wall.Create", api_top_k=3, code_top_k=1, rewrite=False)
-        assert results.api_items[0].name.startswith("Wall.Create(")
+        assert results.api_items[0].name == "Wall.Create Method"
         assert results.sdk_items[0].project == "CreateWall"
     assert "vector search failed" in caplog.text
     assert r._embedder is None and "disabled for this process" in caplog.text
