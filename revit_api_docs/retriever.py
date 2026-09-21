@@ -693,7 +693,7 @@ class RAGRetriever:
                     # them with the identifier before the first space or "(" so
                     # Wall.Create and its overloads outrank Wall.CreateProfileSketch.
                     if "." in token:
-                        head = re.split(r"[\s(]", name_l, 1)[0]
+                        head = re.split(r"[\s(]", name_l, maxsplit=1)[0]
                         if head == token:
                             score += 6.0 * tw
                         elif head.startswith(token):
