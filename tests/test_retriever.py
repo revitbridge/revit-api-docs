@@ -224,3 +224,47 @@ def test_open_collections_is_thread_safe(keyword_only_retriever, monkeypatch):
     assert opened == ["revit_api", "revit_sdk"]  # each collection opened exactly once
     assert all(a is not None and c is not None for a, c in seen)
     assert {c.name for _, c in seen} == {"revit_sdk"} and {a.name for a, _ in seen} == {"revit_api"}
+
+
+# ── vector tier honours top_k=0 ─────────────────────────────────────────────
+
+class _ZeroEmbedder:
+    def embed_query(self, query):
+        return [0.0, 0.0]
+
+
+class _RecordingCollection:
+    def __init__(self, ids):
+        self.ids = ids
+        self.calls: list[int] = []
+
+    def query(self, query_embeddings, n_results):
+        self.calls.append(n_results)
+        return {"ids": [self.ids[:n_results]], "distances": [[0.1] * min(n_results, len(self.ids))]}
+
+
+@pytest.fixture
+def vector_retriever(keyword_only_retriever, monkeypatch):
+    r = keyword_only_retriever
+    r._embedder = _ZeroEmbedder()
+    r._api_collection = _RecordingCollection(["1", "2", "3"])
+    r._code_collection = _RecordingCollection(["1", "2"])
+    monkeypatch.setattr(r, "_open_collections", lambda: None)
+    return r
+
+
+def test_code_top_k_zero_skips_the_code_collection_even_with_rerank(vector_retriever):
+    r = vector_retriever
+    # what search_revit_api does: rerank on, no code examples wanted
+    results = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert r._code_collection.calls == []
+    assert r._api_collection.calls == [r._api_top_k]  # broad recall for the reranker
+    assert results.sdk_items == [] and results.api_items
+
+
+def test_api_top_k_zero_skips_the_api_collection(vector_retriever):
+    r = vector_retriever
+    results = r.search("wall", api_top_k=0, code_top_k=2, rewrite=False, rerank=True)
+    assert r._api_collection.calls == []
+    assert r._code_collection.calls == [r._code_top_k]
+    assert results.api_items == [] and len(results.sdk_items) == 2

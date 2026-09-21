@@ -293,9 +293,10 @@ class RAGRetriever:
 
         # In fast mode: retrieve exactly final_api_n, skip rewrite + rerank
         # In full mode: retrieve broad (top_k), then rerank down to final_api_n
+        # A source whose final count is 0 is not queried at all.
         use_rerank = rewrite if rerank is None else rerank
-        retrieve_api_k = self._api_top_k if use_rerank else final_api_n
-        retrieve_code_k = self._code_top_k if use_rerank else final_code_n
+        retrieve_api_k = (self._api_top_k if use_rerank else final_api_n) if final_api_n > 0 else 0
+        retrieve_code_k = (self._code_top_k if use_rerank else final_code_n) if final_code_n > 0 else 0
 
         # Tier 0: Query rewriting
         search_query = self.rewrite_query(query) if rewrite else query
