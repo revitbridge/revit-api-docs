@@ -63,6 +63,36 @@ def test_status_messages_while_not_ready(monkeypatch):
     assert "not available: RuntimeError: disk full" in msg
 
 
+def test_failed_state_claims_a_retry_only_when_one_was_started(monkeypatch):
+    import threading
+
+    st = server._State()
+    monkeypatch.setattr(server, "_state", st)
+    st.status = "failed"
+    st.error = "RuntimeError: disk full"
+
+    # A finished (dead) thread: this call starts a new one and says so.
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    st._thread = dead
+    started: list[threading.Thread] = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self))
+    msg = asyncio.run(server.search_revit_api("Wall.Create"))
+    assert "Retrying in the background" in msg and len(started) == 1
+    assert st._thread is started[0]
+
+    # A retry thread still alive: no new thread, no "retrying" claim.
+    class _Alive:
+        def is_alive(self):
+            return True
+
+    st._thread = _Alive()  # type: ignore[assignment]
+    msg = asyncio.run(server.get_code_examples("wall"))
+    assert "Retrying in the background" not in msg
+    assert "A retry is already running" in msg and len(started) == 1
+
+
 def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
     from revit_api_docs.config import load_config
     from revit_api_docs.retriever import RAGRetriever

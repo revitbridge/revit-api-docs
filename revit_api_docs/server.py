@@ -103,11 +103,14 @@ class _State:
                 log.exception("preparing the data set failed")
                 raise
 
-    def start_background(self) -> None:
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._prepare_quietly,
-                                            name="revit-api-docs-prepare", daemon=True)
-            self._thread.start()
+    def start_background(self) -> bool:
+        """Start the preparation thread unless one is running; True if started."""
+        if self._thread is not None and self._thread.is_alive():
+            return False
+        self._thread = threading.Thread(target=self._prepare_quietly,
+                                        name="revit-api-docs-prepare", daemon=True)
+        self._thread.start()
+        return True
 
     def _prepare_quietly(self) -> None:
         try:
@@ -120,13 +123,13 @@ class _State:
         if self.retriever is not None:
             return None
         if self.status == "failed":
-            # Let the next call retry (network hiccup, disk full and freed, ...).
-            if self._thread is not None and not self._thread.is_alive():
-                self._thread = None
-            self.start_background()
-            return (f"revit-api-docs is not available: {self.error}. Retrying in the "
-                    f"background; call again in a moment or run `revit-api-docs download` "
-                    f"in a terminal to see the full error.")
+            # Let the next call retry (network hiccup, disk full and freed, ...),
+            # but only claim a retry when this call actually started one.
+            retrying = self.start_background()
+            how = ("Retrying in the background; call again in a moment"
+                   if retrying else "A retry is already running; call again in a moment")
+            return (f"revit-api-docs is not available: {self.error}. {how}, or run "
+                    f"`revit-api-docs download` in a terminal to see the full error.")
         self.start_background()
         if self.status == "downloading":
             return (f"revit-api-docs is downloading its data set on first run "
