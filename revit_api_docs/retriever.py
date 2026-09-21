@@ -601,13 +601,52 @@ class RAGRetriever:
     # Keyword search (SQLite direct)
     # ------------------------------------------------------------------
 
+    # Candidates handed from SQL to the Python scorer. The cap is applied after
+    # SQL has ranked every matching row, never to an arbitrary rowid subset.
+    _KEYWORD_CANDIDATES = 300
+
+    def _keyword_candidates(self, weighted_tokens: list[tuple[str, float]]) -> list[sqlite3.Row]:
+        """All rows matching any token, ordered by a coarse SQL relevance score.
+
+        Per token: name hit 5*w, full_id hit 1.5*w, summary hit 0.5*w (the same
+        weights the Python scorer starts from), so rows with several tokens in
+        the name come first and the LIMIT trims the long tail of summary-only
+        hits instead of dropping exact name matches.
+        """
+        score_terms: list[str] = []
+        params: list[str] = []
+        for token, w in weighted_tokens:
+            like = f"%{_escape_like(token)}%"
+            score_terms.append(
+                f"(LOWER(name) LIKE ? ESCAPE '\\') * {5.0 * w:.2f}"
+                f" + (LOWER(full_id) LIKE ? ESCAPE '\\') * {1.5 * w:.2f}"
+                f" + (LOWER(summary) LIKE ? ESCAPE '\\') * {0.5 * w:.2f}"
+            )
+            params.extend([like, like, like])
+        sql = (
+            "SELECT id, name, full_id, summary, info, syntax, parameters, remark, sql_score FROM ("
+            "  SELECT id, name, full_id, summary, info, syntax, parameters, remark, "
+            f"    ({' + '.join(score_terms)}) AS sql_score FROM revit_api"
+            ") WHERE sql_score > 0 "
+            "ORDER BY sql_score DESC, LENGTH(name) ASC, id ASC "
+            f"LIMIT {self._KEYWORD_CANDIDATES}"
+        )
+        conn = sqlite3.connect(self._api_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
     def _keyword_search_api(self, query: str, limit: int = 15) -> list[RetrievedItem]:
         """Search API docs by keyword matching on name/full_id/summary.
 
-        Two-pass approach:
-        1. Narrow SQL: rows where ALL tokens match in name/full_id (precise)
-        2. Broad SQL: rows where ANY token matches (recall), lower priority
-        Python scoring ranks by match quality, penalizes long compound names.
+        1. SQL ranks every row that matches any token by a coarse relevance
+           score and hands over the top _KEYWORD_CANDIDATES (see
+           _keyword_candidates).
+        2. Python scoring ranks those by match quality (name > full_id >
+           summary, segment and exact-identifier bonuses) and penalizes long
+           compound names.
         Token weights from _normalize_search_tokens boost entity nouns over verbs.
         """
         weighted_tokens = self._normalize_search_tokens(query)
@@ -617,47 +656,7 @@ class RAGRetriever:
         tokens = [t for t, _ in weighted_tokens]
         token_weights = {t: w for t, w in weighted_tokens}
 
-        conn = sqlite3.connect(self._api_db)
-        conn.row_factory = sqlite3.Row
-
-        # Pass 1: ALL tokens in name or full_id (high precision)
-        all_conditions = []
-        all_params = []
-        for token in tokens:
-            like = f"%{_escape_like(token)}%"
-            all_conditions.append(
-                "(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(full_id) LIKE ? ESCAPE '\\')"
-            )
-            all_params.extend([like, like])
-        all_where = " AND ".join(all_conditions)
-        narrow_sql = (
-            f"SELECT id, name, full_id, summary, info, syntax, parameters, remark "
-            f"FROM revit_api WHERE {all_where} LIMIT 100"
-        )
-        narrow_rows = conn.execute(narrow_sql, all_params).fetchall()
-        seen_ids = {r["id"] for r in narrow_rows}
-
-        # Pass 2: ANY token in name/full_id/summary (broader recall)
-        any_conditions = []
-        any_params = []
-        for token in tokens:
-            like = f"%{_escape_like(token)}%"
-            any_conditions.append(
-                "(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(full_id) LIKE ? ESCAPE '\\' OR LOWER(summary) LIKE ? ESCAPE '\\')"
-            )
-            any_params.extend([like, like, like])
-        any_where = " OR ".join(any_conditions)
-        broad_sql = (
-            f"SELECT id, name, full_id, summary, info, syntax, parameters, remark "
-            f"FROM revit_api WHERE {any_where} LIMIT 200"
-        )
-        broad_rows = [
-            r for r in conn.execute(broad_sql, any_params).fetchall()
-            if r["id"] not in seen_ids
-        ]
-        conn.close()
-
-        all_rows = list(narrow_rows) + broad_rows
+        all_rows = self._keyword_candidates(weighted_tokens)
 
         # Score each row in Python (token weights boost entity nouns)
         scored: list[tuple[float, dict]] = []

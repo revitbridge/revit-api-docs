@@ -142,3 +142,34 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
     # fourth query: keyword only, no further embedding attempts
     r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False)
     assert _BrokenEmbedder.calls == 3
+
+
+# ── candidate selection ─────────────────────────────────────────────────────
+
+def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeypatch, tmp_path):
+    """Hundreds of summary-only hits with lower rowids must not push an exact
+    name match out of the SQL candidate set (the old LIMIT had no ORDER BY)."""
+    import sqlite3
+
+    api_db, sdk_db = tiny_dbs
+    conn = sqlite3.connect(api_db)
+    conn.execute("DELETE FROM revit_api")
+    conn.executemany(
+        "INSERT INTO revit_api (name, full_id, summary) VALUES (?,?,?)",
+        [(f"Thing{i}.Get Method", f"M:Thing{i}.Get", "Returns the floor of this thing.") for i in range(400)],
+    )
+    conn.execute(
+        "INSERT INTO revit_api (name, full_id, summary) VALUES (?,?,?)",
+        ("Floor.Create Method", "Floor.Create", "Creates a floor from a boundary."),
+    )
+    conn.commit()
+    conn.close()
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    r = RAGRetriever(cfgmod.load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    monkeypatch.setattr(RAGRetriever, "_KEYWORD_CANDIDATES", 50)
+
+    results = r.search("create floor from boundary", api_top_k=3, code_top_k=0, rewrite=False)
+    assert [i.name for i in results.api_items][0] == "Floor.Create Method"
+    # the window is a cap on ranked rows, not a scan limit
+    assert len(r._keyword_candidates(r._normalize_search_tokens("floor"))) == 50

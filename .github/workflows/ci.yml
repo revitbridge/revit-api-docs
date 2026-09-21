@@ -13,11 +13,21 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.13"]
+    env:
+      # tests/test_shipped_db.py runs keyword-mode ranking checks against the
+      # two SQLite files of the data release (34 MB), fetched once and cached.
+      REVIT_API_DOCS_DATA_DIR: ${{ github.workspace }}/.data-cache
+      REVIT_API_DOCS_TEST_DOWNLOAD: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Cache the shipped SQLite files
+        uses: actions/cache@v4
+        with:
+          path: .data-cache/sqlite
+          key: revit-api-docs-sqlite-v1.0-data
       - name: Sync
         run: uv sync
       - name: Test
