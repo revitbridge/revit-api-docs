@@ -113,13 +113,26 @@ def paths(root: Path | None = None) -> DataPaths:
     )
 
 
-def _installed(root: Path, art: Artifact, check_size: bool) -> bool:
+def _installed(root: Path, art: Artifact) -> bool:
     target = root / art.target
     if art.extract:
         return (target / "chroma.sqlite3").is_file()
-    if not target.is_file():
-        return False
-    return not check_size or target.stat().st_size == art.size
+    return target.is_file()
+
+
+def unexpected_sizes(root: Path) -> list[tuple[Artifact, int]]:
+    """Present files whose size differs from the release asset (hand-copied
+    or built locally). They are used as they are, never replaced."""
+    out = []
+    for art in ARTIFACTS:
+        if art.extract:
+            continue
+        target = root / art.target
+        if target.is_file():
+            size = target.stat().st_size
+            if size != art.size:
+                out.append((art, size))
+    return out
 
 
 def read_manifest(root: Path) -> dict | None:
@@ -133,18 +146,18 @@ def read_manifest(root: Path) -> dict | None:
 
 
 def missing(root: Path | None = None) -> list[Artifact]:
-    """Artifacts that must be (re)downloaded.
+    """Artifacts that must be downloaded: the absent ones.
 
-    A manifest for this release means the installer verified every file, so
-    only presence is checked. A manifest from another release marks everything
-    stale. Without a manifest (a hand-copied data tree) files are trusted when
-    present with the expected size.
+    An existing file is never replaced, whatever its size (a hand-copied tree
+    may hold a different build; see unexpected_sizes). The one exception is a
+    manifest written by this installer for another release, which marks the
+    whole tree stale.
     """
     root = Path(root) if root is not None else data_dir()
     manifest = read_manifest(root)
     if manifest is not None and manifest.get("release") != RELEASE_TAG:
         return list(ARTIFACTS)
-    return [a for a in ARTIFACTS if not _installed(root, a, check_size=manifest is None)]
+    return [a for a in ARTIFACTS if not _installed(root, a)]
 
 
 def is_ready(root: Path | None = None) -> bool:
@@ -255,6 +268,9 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
     """Make sure every artifact is installed under `root`; return its paths."""
     p = paths(root)
     todo = missing(p.root)
+    for art, size in unexpected_sizes(p.root):
+        log.warning("%s: existing file is %d bytes, the %s release file is %d; using it as is "
+                    "(delete it to re-download)", p.root / art.target, size, RELEASE_TAG, art.size)
     if todo:
         p.root.mkdir(parents=True, exist_ok=True)
         for art in todo:

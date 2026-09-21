@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import io
 import json
+import logging
 import tarfile
 import threading
 from pathlib import Path
@@ -49,9 +50,10 @@ def test_missing_trusts_a_manifestless_tree_and_rejects_other_releases(tmp_path)
             (target / "chroma.sqlite3").write_bytes(b"x")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(b"\0" * art.size)  # size is what _installed checks
+            target.write_bytes(b"hand-copied")  # any size: presence is what counts
     assert data.missing(root) == []
     assert data.is_ready(root)
+    assert [a.name for a, _ in data.unexpected_sizes(root)] == ["revit_api.db", "revit_sdk.db"]
     (root / "manifest.json").write_text(json.dumps({"release": "v0.9-data"}), encoding="utf-8")
     assert [a.name for a in data.missing(root)] == [a.name for a in data.ARTIFACTS]
 
@@ -154,3 +156,21 @@ def test_corrupt_download_is_rejected_and_removed(fake_release, tmp_path, monkey
         data.install_artifact(bad, tmp_path)
     assert not (tmp_path / "downloads" / "revit_sdk.db.part").exists()
     assert not (tmp_path / "sqlite" / "revit_sdk.db").exists()
+
+
+def test_existing_file_of_another_size_survives_ensure_data(fake_release, tmp_path, caplog):
+    """A hand-copied DB (no manifest) is never replaced, whatever its size."""
+    payloads, hits = fake_release
+    mine = tmp_path / "sqlite" / "revit_api.db"
+    mine.parent.mkdir(parents=True)
+    mine.write_bytes(b"my own build of the api db")
+    assert mine.stat().st_size != data.ARTIFACTS[0].size
+
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    p = data.ensure_data(tmp_path)
+
+    assert mine.read_bytes() == b"my own build of the api db"
+    assert len(hits) == 3  # only the three absent artifacts were requested
+    assert p.sdk_db.read_bytes() == payloads["revit_sdk.db"]
+    assert (p.chromadb_api / "chroma.sqlite3").is_file()
+    assert "using it as is" in caplog.text and "revit_api.db" in caplog.text
