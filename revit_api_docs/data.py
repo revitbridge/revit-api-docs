@@ -32,7 +32,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 import httpx
 
@@ -253,13 +253,41 @@ def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = No
         os.replace(part, target)
 
 
-def write_manifest(root: Path) -> None:
+def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
+    """Manifest entry for one artifact, honest about what was checked.
+
+    `installed` means this run downloaded and hash-checked it. Anything else
+    was already in `root`: a file is hashed now and counts as verified only
+    when it matches the release; an unpacked directory has nothing to hash
+    against and is recorded as trusted.
+    """
+    entry: dict = {"target": art.target, "release_sha256": art.sha256, "release_size": art.size}
+    target = root / art.target
+    if installed:
+        entry.update(sha256=art.sha256, size=art.size, verified=True)
+    elif art.extract:
+        entry.update(verified=False, trusted=(target / "chroma.sqlite3").is_file())
+    elif target.is_file():
+        digest = sha256_file(target)
+        verified = digest == art.sha256
+        entry.update(sha256=digest, size=target.stat().st_size, verified=verified)
+        if not verified:
+            entry["trusted"] = True
+    else:
+        entry.update(verified=False, trusted=False)
+    return entry
+
+
+def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
+    """Record the tree under `root`; `installed` names the artifacts this run
+    downloaded and verified (see describe_artifact for the rest)."""
     root.mkdir(parents=True, exist_ok=True)
+    done = set(installed)
     manifest = {
         "release": RELEASE_TAG,
         "source": release_url(),
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "files": {a.name: {"sha256": a.sha256, "size": a.size, "target": a.target} for a in ARTIFACTS},
+        "files": {a.name: describe_artifact(root, a, a.name in done) for a in ARTIFACTS},
     }
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -275,7 +303,10 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
         p.root.mkdir(parents=True, exist_ok=True)
         for art in todo:
             install_artifact(art, p.root, progress=progress)
-        write_manifest(p.root)
+        write_manifest(p.root, installed=[a.name for a in todo])
+        trusted = [n for n, e in read_manifest(p.root)["files"].items() if e.get("trusted")]
+        if trusted:
+            log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
         shutil.rmtree(p.root / "downloads", ignore_errors=True)
     elif read_manifest(p.root) is None:
         log.info("using existing data in %s (no manifest)", p.root)

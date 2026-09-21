@@ -129,6 +129,8 @@ def test_ensure_data_downloads_verifies_and_extracts(fake_release, tmp_path):
     assert (p.chromadb_code / "chroma.sqlite3").read_bytes() == b"c"
     manifest = json.loads(p.manifest.read_text(encoding="utf-8"))
     assert manifest["release"] == data.RELEASE_TAG
+    assert all(e["verified"] is True and "trusted" not in e for e in manifest["files"].values())
+    assert manifest["files"]["revit_api.db"]["sha256"] == data.ARTIFACTS[0].sha256
     assert not (tmp_path / "downloads").exists()  # tarballs and temp files are gone
     assert data.missing(tmp_path) == []
     assert {n for n, _, _ in seen} == set(payloads)
@@ -174,3 +176,33 @@ def test_existing_file_of_another_size_survives_ensure_data(fake_release, tmp_pa
     assert p.sdk_db.read_bytes() == payloads["revit_sdk.db"]
     assert (p.chromadb_api / "chroma.sqlite3").is_file()
     assert "using it as is" in caplog.text and "revit_api.db" in caplog.text
+
+
+def test_manifest_never_claims_release_hashes_for_pre_existing_files(fake_release, tmp_path, caplog):
+    payloads, _ = fake_release
+    # a foreign DB, a DB that happens to be the release bytes, and a pre-existing index directory
+    (tmp_path / "sqlite").mkdir(parents=True)
+    (tmp_path / "sqlite" / "revit_api.db").write_bytes(b"my own build of the api db")
+    (tmp_path / "sqlite" / "revit_sdk.db").write_bytes(payloads["revit_sdk.db"])
+    (tmp_path / "chromadb" / "chromadb_code").mkdir(parents=True)
+    (tmp_path / "chromadb" / "chromadb_code" / "chroma.sqlite3").write_bytes(b"old index")
+
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    p = data.ensure_data(tmp_path)
+    files = json.loads(p.manifest.read_text(encoding="utf-8"))["files"]
+
+    foreign = files["revit_api.db"]
+    assert foreign["verified"] is False and foreign["trusted"] is True
+    assert foreign["sha256"] == hashlib.sha256(b"my own build of the api db").hexdigest()
+    assert foreign["sha256"] != foreign["release_sha256"]
+    assert foreign["size"] == len(b"my own build of the api db")
+
+    same = files["revit_sdk.db"]  # hashed now, matches the release
+    assert same["verified"] is True and "trusted" not in same
+
+    index = files["chromadb_code.tar.gz"]  # nothing to hash a directory against
+    assert index["verified"] is False and index["trusted"] is True and "sha256" not in index
+
+    downloaded = files["chromadb_api.tar.gz"]
+    assert downloaded["verified"] is True and downloaded["sha256"] == downloaded["release_sha256"]
+    assert "unverified pre-existing files: revit_api.db, chromadb_code.tar.gz" in caplog.text
