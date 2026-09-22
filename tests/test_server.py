@@ -3,8 +3,7 @@ and a real stdio round trip with a keyword-only retriever."""
 from __future__ import annotations
 
 import asyncio
-import json
-import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -108,26 +107,63 @@ def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
     assert server.search_api(r, "qqqq", 5).startswith("No API entries found")
 
 
+# -- CLI subcommands --------------------------------------------------------
+
+def _cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-m", "revit_api_docs", *args],
+                          capture_output=True, text=True, env=env, cwd=str(ROOT))
+
+
+def test_search_stderr_holds_only_the_warnings_that_matter(tiny_data_dir, no_key_env):
+    """Plain `logger: message` lines at WARNING; the INFO chatter (data dir,
+    keyword search details, httpx requests) and the index/content mismatch
+    of the shipped data stay off the terminal."""
+    env = dict(no_key_env, REVIT_API_DOCS_DATA_DIR=str(tiny_data_dir))
+    out = _cli(["search", "Wall.Create", "--top-k", "3"], env)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.startswith("### Wall.Create" + chr(10))
+    lines = out.stderr.splitlines()
+    # The two data warnings are the fixture's: its SQLite files are not the
+    # release sizes, which ensure_data reports for any hand-copied tree.
+    assert [ln.split(":")[0] for ln in lines] == [
+        "revit_api_docs.data", "revit_api_docs.data", "revit_api_docs.retriever", "revit_api_docs.reranker"]
+    assert all("using it as is" in ln for ln in lines[:2])
+    assert "embedding disabled" in lines[2] and "COHERE_API_KEY" in lines[3]
+    for noise in ("mismatch", "INFO", "[search]", "[keyword_search]", "ready: data in", "HTTP Request"):
+        assert noise not in out.stderr
+
+
+def test_search_verbose_shows_info_including_the_mismatch(tiny_data_dir, no_key_env):
+    env = dict(no_key_env, REVIT_API_DOCS_DATA_DIR=str(tiny_data_dir))
+    out = _cli(["-v", "search", "Wall.Create", "--top-k", "3"], env)
+    assert out.returncode == 0, out.stderr
+    assert "revit_api_docs.retriever: index/content mismatch" in out.stderr
+    assert "revit_api_docs.server: ready: data in" in out.stderr
+    assert "[keyword_search]" in out.stderr
+
+
+def test_cli_logging_replaces_the_server_setup_and_quiets_httpx():
+    """MCPServer() configures the root logger at import; the CLI must still
+    end up with its own plain handler, WARNING by default, httpx at WARNING."""
+    code = (
+        "import logging, sys; from revit_api_docs.server import _configure_logging; "
+        "_configure_logging(verbose=bool(int(sys.argv[1]))); root = logging.getLogger(); "
+        "print(logging.getLevelName(root.level), logging.getLevelName(logging.getLogger('httpx').getEffectiveLevel()), "
+        "[type(h).__name__ for h in root.handlers], [h.stream is sys.stderr for h in root.handlers])"
+    )
+    quiet = subprocess.run([sys.executable, "-c", code, "0"], capture_output=True, text=True, check=True, cwd=ROOT)
+    assert quiet.stdout.strip() == "WARNING WARNING ['StreamHandler'] [True]"
+    verbose = subprocess.run([sys.executable, "-c", code, "1"], capture_output=True, text=True, check=True, cwd=ROOT)
+    assert verbose.stdout.strip() == "INFO WARNING ['StreamHandler'] [True]"
+
+
 @pytest.mark.anyio
-async def test_stdio_round_trip_with_keyword_only_data(tiny_dbs, tmp_path):
+async def test_stdio_round_trip_with_keyword_only_data(tiny_data_dir, no_key_env):
     """Spawn the real server as an MCP stdio subprocess against a tiny data dir."""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    api_db, sdk_db = tiny_dbs
-    root = tmp_path / "data"
-    (root / "sqlite").mkdir(parents=True)
-    os.replace(api_db, root / "sqlite" / "revit_api.db")
-    os.replace(sdk_db, root / "sqlite" / "revit_sdk.db")
-    for d in ("chromadb_api", "chromadb_code"):
-        (root / "chromadb" / d).mkdir(parents=True)
-        (root / "chromadb" / d / "chroma.sqlite3").write_bytes(b"")
-    # A manifest for the current release means "installed and verified": only existence is checked.
-    (root / "manifest.json").write_text(json.dumps({"release": server.data.RELEASE_TAG}), encoding="utf-8")
-
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY")}
-    env["REVIT_API_DOCS_DATA_DIR"] = str(root)
+    env = dict(no_key_env, REVIT_API_DOCS_DATA_DIR=str(tiny_data_dir))
     params = StdioServerParameters(command=sys.executable, args=["-m", "revit_api_docs"], env=env, cwd=str(ROOT))
 
     async with stdio_client(params) as (read, write):

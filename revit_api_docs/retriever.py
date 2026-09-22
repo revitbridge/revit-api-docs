@@ -125,6 +125,8 @@ class RAGRetriever:
 
         # Consistency check: record_count in the ChromaDB meta.json should equal
         # the SQLite revit_api row count; otherwise the two stores are out of sync.
+        # Logged at INFO: the shipped v1.0-data has this property (28863 vectors,
+        # 27596 rows) and the extra vectors are dropped at query time.
         try:
             meta_path = os.path.join(chromadb_api_dir, "meta.json")
             if os.path.exists(meta_path):
@@ -134,7 +136,7 @@ class RAGRetriever:
                 sqlite_count = conn.execute("SELECT COUNT(*) FROM revit_api").fetchone()[0]
                 conn.close()
                 if meta_count is not None and meta_count != sqlite_count:
-                    self._log.warning(
+                    self._log.info(
                         "index/content mismatch: ChromaDB meta.record_count=%s but SQLite "
                         "revit_api has %s rows; vectors without a row are dropped at query time "
                         "(rebuild the ChromaDB index after parse_chm rebuilds SQLite)",

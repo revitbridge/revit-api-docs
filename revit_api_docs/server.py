@@ -195,11 +195,20 @@ async def get_code_examples(query: str, top_k: int = 3) -> str:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _configure_logging(verbose: bool) -> None:
+    """Plain stderr logging for the `download` and `search` subcommands.
+
+    MCPServer() above already configured the root logger at import time
+    (INFO, rich handler), so this must replace that setup (force=True);
+    `serve` keeps it. httpx's per-request INFO lines stay hidden even with
+    -v: the data module logs what it downloads in its own words.
+    """
     logging.basicConfig(
         stream=sys.stderr,
         level=logging.INFO if verbose else logging.WARNING,
         format="%(name)s: %(message)s",
+        force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
     p_search.add_argument("--top-k", type=int, default=None)
     args = parser.parse_args(argv)
 
-    _configure_logging(args.verbose or args.command in ("download", "search"))
+    if args.command in ("download", "search"):
+        _configure_logging(args.verbose)
 
     if args.command == "download":
         paths = data.ensure_data(progress=data.stderr_progress)

@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format follows
 - The embedding providers look up their API key before importing the SDK, so
   keyword-only runs (no key) no longer import `openai`; `search` starts about
   2 s faster.
+- `search` and `download` log plain `logger: message` lines to stderr at
+  WARNING (`-v` for INFO), with `httpx` request lines hidden; the MCP server's
+  logging is unchanged. The index/content mismatch of the shipped data set is
+  logged at INFO instead of WARNING.
 
 ## [0.1.0] - 2026-09-20
 

@@ -1,10 +1,16 @@
 """Shared fixtures: a tiny SQLite data set so retriever tests need no ChromaDB or network."""
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
+
+from revit_api_docs import data
+
+KEY_VARS = ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY")
 
 API_ROWS = [
     # (name, full_id, summary, syntax, parameters, remark)
@@ -67,6 +73,34 @@ def tiny_dbs(tmp_path: Path) -> tuple[Path, Path]:
     conn.commit()
     conn.close()
     return api_db, sdk_db
+
+
+@pytest.fixture
+def tiny_data_dir(tiny_dbs, tmp_path: Path) -> Path:
+    """A data directory the installer accepts as complete (manifest for the
+    current release, empty ChromaDB placeholders), so subprocesses start in
+    keyword mode without downloading anything."""
+    api_db, sdk_db = tiny_dbs
+    root = tmp_path / "data"
+    (root / "sqlite").mkdir(parents=True)
+    os.replace(api_db, root / "sqlite" / "revit_api.db")
+    os.replace(sdk_db, root / "sqlite" / "revit_sdk.db")
+    for d in ("chromadb_api", "chromadb_code"):
+        (root / "chromadb" / d).mkdir(parents=True)
+        (root / "chromadb" / d / "chroma.sqlite3").write_bytes(b"")
+    # record_count differs from the SQLite row count on purpose: the shipped
+    # data set has the same property and it must not surface as a warning.
+    (root / "chromadb" / "chromadb_api" / "meta.json").write_text(
+        json.dumps({"record_count": 999}), encoding="utf-8")
+    # A manifest for the current release means "installed and verified": only existence is checked.
+    (root / "manifest.json").write_text(json.dumps({"release": data.RELEASE_TAG}), encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def no_key_env() -> dict[str, str]:
+    """os.environ without any embedding/rerank key, for subprocesses."""
+    return {k: v for k, v in os.environ.items() if k not in KEY_VARS}
 
 
 @pytest.fixture
