@@ -6,6 +6,7 @@ import http.server
 import io
 import json
 import logging
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -56,6 +57,55 @@ def test_missing_trusts_a_manifestless_tree_and_rejects_other_releases(tmp_path)
     assert [a.name for a, _ in data.unexpected_sizes(root)] == ["revit_api.db", "revit_sdk.db"]
     (root / "manifest.json").write_text(json.dumps({"release": "v0.9-data"}), encoding="utf-8")
     assert [a.name for a in data.missing(root)] == [a.name for a in data.ARTIFACTS]
+
+
+# -- progress reporting -------------------------------------------------------
+
+class _FakeStderr(io.StringIO):
+    def __init__(self, tty: bool):
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_progress_redraws_one_line_on_a_terminal(monkeypatch):
+    err = _FakeStderr(tty=True)
+    monkeypatch.setattr(sys, "stderr", err)
+    report = data.StderrProgress()
+    for done in (1_000_000, 2_500_000, 4_000_000, 4_000_000):  # the final report comes twice
+        report("revit_api.db", done, 4_000_000)
+    report("revit_sdk.db", 500_000, 500_000)
+    out = err.getvalue()
+    assert out == ("revit-api-docs: revit_api.db 1.0/4.0 MB (25%)\r"
+                   "revit-api-docs: revit_api.db 2.5/4.0 MB (62%)\r"
+                   "revit-api-docs: revit_api.db 4.0/4.0 MB (100%)\n"
+                   "revit-api-docs: revit_sdk.db 0.5/0.5 MB (100%)\n")
+    assert out.isascii()
+
+
+def test_progress_prints_one_line_per_ten_percent_when_piped(monkeypatch):
+    err = _FakeStderr(tty=False)
+    monkeypatch.setattr(sys, "stderr", err)
+    report = data.StderrProgress()
+    total = 1_000_000
+    for done in range(0, total + 1, 7_000):  # one report per "second", 143 of them
+        report("chromadb_api.tar.gz", done, total)
+        report("other.db", done, total)  # files are tracked independently
+    report("chromadb_api.tar.gz", total, total)
+    report("chromadb_api.tar.gz", total, total)
+    out = err.getvalue()
+    assert "\r" not in out and out.isascii()
+    lines = [ln for ln in out.splitlines() if "chromadb_api.tar.gz" in ln]
+    steps = [int(ln.rsplit("(", 1)[1].rstrip("%)")) // 10 for ln in lines]
+    assert steps == list(range(11))  # 0%, 10%, ..., 100%, once each
+    assert lines[-1].endswith("1.0/1.0 MB (100%)")
+    assert sum("other.db" in ln for ln in out.splitlines()) == 10  # never reached 100%
+
+
+def test_default_reporter_is_the_stateful_one():
+    assert isinstance(data.stderr_progress, data.StderrProgress)
 
 
 # ── end-to-end against a local HTTP server ───────────────────────────────────

@@ -313,8 +313,39 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
     return p
 
 
-def stderr_progress(name: str, done: int, total: int) -> None:
-    """Default progress reporter: one line per step, never on stdout."""
-    pct = 100 * done // total if total else 0
-    print(f"revit-api-docs: {name} {done / 1e6:.1f}/{total / 1e6:.1f} MB ({pct}%)",
-          file=sys.stderr, flush=True)
+def _is_tty(stream) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError):  # no stderr, or a closed one
+        return False
+
+
+class StderrProgress:
+    """Default progress reporter, never on stdout (ASCII only).
+
+    On a terminal the current file's line is redrawn in place; anywhere else
+    (MCP host logs, pipes) one line per 10% keeps the log readable.
+    download_file reports every second and twice at the end, so the last
+    report of each file is remembered.
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[str, int] = {}   # name -> last percentage (tty) or 10% step (pipe)
+
+    def __call__(self, name: str, done: int, total: int) -> None:
+        pct = min(100 * done // total, 100) if total else 0
+        line = f"revit-api-docs: {name} {done / 1e6:.1f}/{total / 1e6:.1f} MB ({pct}%)"
+        if _is_tty(sys.stderr):
+            if self._last.get(name) == 100:
+                return
+            self._last[name] = pct
+            print(line, end="\n" if pct == 100 else "\r", file=sys.stderr, flush=True)
+        else:
+            step = pct // 10 * 10
+            if self._last.get(name) == step:
+                return
+            self._last[name] = step
+            print(line, file=sys.stderr, flush=True)
+
+
+stderr_progress: ProgressFn = StderrProgress()

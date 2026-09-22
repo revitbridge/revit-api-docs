@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
   WARNING (`-v` for INFO), with `httpx` request lines hidden; the MCP server's
   logging is unchanged. The index/content mismatch of the shipped data set is
   logged at INFO instead of WARNING.
+- Download progress: on a terminal the line is redrawn in place; in host logs
+  and pipes one line per 10% instead of one per second.
 
 ## [0.1.0] - 2026-09-20
 
