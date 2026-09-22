@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The embedding providers look up their API key before importing the SDK, so
+  keyword-only runs (no key) no longer import `openai`; `search` starts about
+  2 s faster.
+
 ## [0.1.0] - 2026-09-20
 
 First release, split out of the `revit-api-rag` repository (working-tree copy,

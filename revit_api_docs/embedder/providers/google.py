@@ -6,10 +6,11 @@ from ...config import get_api_key
 class GoogleEmbedding(BaseEmbedding):
 
     def __init__(self, model: str = "text-embedding-004", dimension: int = 768, api_key_env: str = "GOOGLE_API_KEY"):
+        api_key = get_api_key(api_key_env)  # key first, SDK import second (see openai.py)
         from google import genai
         self._model = model
         self._dimension = dimension
-        self._client = genai.Client(api_key=get_api_key(api_key_env))
+        self._client = genai.Client(api_key=api_key)
 
     @property
     def model_name(self) -> str:

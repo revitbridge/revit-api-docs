@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -23,6 +26,25 @@ def test_keyword_only_mode_without_key(keyword_only_retriever, caplog):
     r = keyword_only_retriever
     assert r.vector_search_enabled is False
     assert r._api_collection is None  # chromadb never opened
+
+
+def test_keyword_only_retriever_never_imports_openai(tiny_dbs, tmp_path):
+    """Without an embedding key the provider must fail before importing the
+    SDK: `search` startup and the server's keyword mode never pay for it."""
+    api_db, sdk_db = tiny_dbs
+    code = (
+        "import sys; from revit_api_docs.config import load_config; "
+        "from revit_api_docs.retriever import RAGRetriever; "
+        f"r = RAGRetriever(load_config(), {str(api_db)!r}, {str(sdk_db)!r}, "
+        f"{str(tmp_path / 'a')!r}, {str(tmp_path / 'b')!r}); "
+        "assert r.vector_search_enabled is False; "
+        "print(sorted(m for m in ('chromadb', 'openai', 'google.genai') if m in sys.modules))"
+    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY")}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env)
+    assert out.stdout.strip() == "[]"
+    assert "embedding disabled" in out.stderr
 
 
 def test_search_wall_create_ranks_exact_identifier_first(keyword_only_retriever):

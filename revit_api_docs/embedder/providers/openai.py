@@ -8,6 +8,9 @@ class OpenAIEmbedding(BaseEmbedding):
     def __init__(self, model: str = "openai/text-embedding-3-large", dimension: int = 3072,
                  api_key_env: str = "OPENROUTER_API_KEY", base_url: str = "https://openrouter.ai/api/v1",
                  timeout: float = 30.0):
+        # Resolve the key before importing the SDK: without a key the retriever
+        # runs keyword-only and must not pay for the openai import (about 2 s).
+        api_key = get_api_key(api_key_env)
         from openai import OpenAI
         import httpx
 
@@ -20,7 +23,7 @@ class OpenAIEmbedding(BaseEmbedding):
         # One retry and a short timeout: a bad key or a down endpoint must not
         # stall a query for long; the retriever falls back to keyword search.
         self._client = OpenAI(
-            api_key=get_api_key(api_key_env),
+            api_key=api_key,
             base_url=base_url,
             http_client=self._http_client,
             max_retries=1,
