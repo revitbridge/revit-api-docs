@@ -274,11 +274,22 @@ notes:
       TYPESAFE_API_KEY. Each candidate gets a calibrated 0-1 probability; with
       REVIT_API_DOCS_MIN_RELEVANCE set the tool says when nothing matched.
       Context: 64k tokens per request, 32k per question; billed per input token
-      ($0.042 per million); rate limits are set per organization (HTTP 429);
-      API only, no self-hosting; no data-retention policy found (2026-10-24).
+      ($0.042 per million); rate limits are set per organization (HTTP 429).
+      It is a hosted API (no self-hosted option is documented), so queries and
+      candidates leave the machine.
     revit: "*"
     tags: [rerank, jev, typesafe, relevance]
     source: https://docs.typesafe.ai/models.md
+
+  - id: jev-data-handling
+    text: >-
+      TypeSafe's legal page refers data retention and its commitment not to
+      train models on user data to its Data Processing Agreement, and offers
+      zero data retention to enterprise customers. Read the agreement before
+      sending anything but public API names and generic task descriptions.
+    revit: "*"
+    tags: [jev, typesafe, privacy, retention]
+    source: https://docs.typesafe.ai/legal.md
 
   - id: jev-rerank-ecosystem
     text: >-
