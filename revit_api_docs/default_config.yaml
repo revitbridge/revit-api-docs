@@ -59,20 +59,32 @@ embedding:
       dimension: 768
       api_key_env: "GOOGLE_API_KEY"
 
-# --- Rerank (optional; Cohere native REST API, skipped without the key) ---
+# --- Rerank (optional; skipped without the provider's key) ---
+# provider: cohere | jev | none (env REVIT_API_DOCS_RERANK_PROVIDER).
+# jev: TypeSafe System One, POST https://api.typesafe.ai/v1/systemone, one
+# noul question per candidate (calibrated 0-1 probability). When a Jev call
+# fails, Cohere is used if COHERE_API_KEY is set, otherwise no rerank.
 rerank:
   enabled: true
-  provider: "cohere"
+  provider: "cohere"        # cohere | jev | none
   models:
     cohere:
       model: "rerank-v3.5"
       api_key_env: "COHERE_API_KEY"
+    jev:
+      model: "jev-latest"   # env REVIT_API_DOCS_JEV_MODEL; pin e.g. jev-1.14.0 for experiments
+      api_key_env: "TYPESAFE_API_KEY"
+      batch_size: 30        # documents per request (at most 30)
+      max_concurrency: 2    # requests in flight per process
+      max_retries: 2        # on 429 / 529 / 5xx / timeouts, exponential backoff
+      timeout: 20           # seconds per request
 
 # --- Retrieval ---
 retrieval:
   api:
     top_k: 30          # candidates fetched before rerank
     rerank_top_n: 15   # default number returned
+    min_relevance: null     # only honoured when the active provider returns calibrated scores (jev)
   code:
     top_k: 5
     rerank_top_n: 3

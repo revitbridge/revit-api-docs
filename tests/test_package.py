@@ -40,6 +40,7 @@ def test_wheel_ships_runtime_only():
     assert data["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["revit_api_docs"]
     assert "pipeline" in data["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert (ROOT / "revit_api_docs" / "default_config.yaml").is_file()
+    assert (ROOT / "revit_api_docs" / "environment.yaml").is_file()  # package data, no download
     assert (ROOT / "revit_api_docs" / "prompts" / "pipeline.rewrite_query.md").is_file()
 
 

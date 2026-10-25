@@ -9,6 +9,10 @@ your model already writes correct Revit code, you do not need it;
 [revit-bridge](https://github.com/revitbridge/revit-bridge) works without it.
 It never talks to Revit and it never calls a model itself.
 
+Queries are **English only**: the corpus is the English API reference. A host
+model that talks to its user in another language rewrites the request into
+English API names or English task keywords before calling a tool.
+
 ## Install
 
 Prerequisites: Python 3.11+ with [`uv`](https://docs.astral.sh/uv/) (for
@@ -35,6 +39,30 @@ claude mcp add revit-api-docs -- uvx revit-api-docs
 
 **Any MCP client** — run `uvx revit-api-docs` as a stdio server.
 
+**Any MCP client over HTTP** — run the server with the MCP streamable HTTP
+transport and point the client at `/mcp`:
+
+```bash
+uvx revit-api-docs serve --transport http --host 127.0.0.1 --port 8765
+```
+
+```json
+{
+  "mcpServers": {
+    "revit-api-docs": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
+```
+
+(Claude Code: `claude mcp add --transport http revit-api-docs http://127.0.0.1:8765/mcp`.)
+stdio stays the default. The HTTP transport has no built-in authentication:
+keep it on a loopback address, or put it behind a reverse proxy that
+authenticates; the server logs a warning when `--host` is not a loopback
+address.
+
 On the first start the server downloads the data set (335 MB, four files) from
 this repository's [`v1.0-data` release](https://github.com/revitbridge/revit-api-docs/releases/tag/v1.0-data)
 into `%LOCALAPPDATA%\revit-api-docs` (Windows) or `~/.local/share/revit-api-docs`
@@ -55,7 +83,12 @@ Two tools, both read-only:
 - `search_revit_api(query, top_k=10)` — API entries with signature, parameters
   and remarks. Query with an API name (`Wall.Create`,
   `FilteredElementCollector OfCategory`) or a short task (`create floor from
-  boundary`).
+  boundary`). The first line names the reranker that ordered the entries
+  (`Rerank: jev`, `cohere` or `none`). Development-environment questions
+  (`target framework for Revit 2027 add-in`) also get up to five curated
+  environment notes (framework, SDK, manifest, reference packages per Revit
+  release, each with its source); these ship with the package and work before
+  the data set is installed and without any key.
 - `get_code_examples(query, top_k=3)` — C# from the SDK samples that use the
   matching APIs, with the project name and the APIs each sample touches.
 
@@ -63,13 +96,17 @@ Without any API key the server answers from keyword search over the SQLite
 reference (exact and partial name matches, which is what a model usually
 asks for once it knows roughly what it wants). With an embedding key it adds
 semantic search over the vector store, and with a Cohere key it reranks the
-merged candidates. See Configure.
+merged candidates; with a TypeSafe key it can rerank with Jev instead, which
+returns a calibrated relevance per entry and, with a threshold, says "no API
+entry matched" instead of returning the closest guesses. See Configure.
 
 Try it from a terminal (installs the data set if needed):
 
 ```bash
 uvx revit-api-docs search "Wall.Create"
 uvx revit-api-docs search "rotate element around axis" --examples
+uvx revit-api-docs environment --revit 2027          # environment notes, no data set needed
+uvx revit-api-docs environment "target framework"   # notes a query matches
 ```
 
 ## Configure
@@ -83,10 +120,18 @@ All settings are environment variables; there is no config file to edit.
 | `REVIT_API_DOCS_EMBEDDING_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/embeddings` endpoint |
 | `REVIT_API_DOCS_EMBEDDING_MODEL` | `openai/text-embedding-3-large` | Must produce the same 3072-dimensional space the shipped vectors were built with (`text-embedding-3-large`); another model makes vector search return noise |
 | `COHERE_API_KEY` | *(unset)* | Enables reranking with Cohere `rerank-v3.5` (native REST API) |
+| `REVIT_API_DOCS_RERANK_PROVIDER` | `cohere` | `cohere`, `jev` or `none`. With `jev`, a failed or unconfigured Jev call falls back to Cohere when `COHERE_API_KEY` is set, otherwise to no reranking; the first output line says which one ran |
+| `TYPESAFE_API_KEY` | *(unset)* | Key for TypeSafe System One (Jev), used when the provider is `jev`. At most 30 candidates per request, 2 requests in flight, 2 retries, 20 s timeout |
+| `REVIT_API_DOCS_JEV_MODEL` | `jev-latest` | Jev model or alias; pin a version such as `jev-1.14.0` for reproducible results |
+| `REVIT_API_DOCS_MIN_RELEVANCE` | *(unset)* | Probability 0-1 (`retrieval.api.min_relevance`). Only honoured while Jev ranks the results: entries below it are dropped, and when none reaches it `search_revit_api` starts with "No API entry in the Revit 2026 data set matched this query" and lists the low-scoring candidates for reference. No effect with Cohere or without reranking |
 | `REVIT_API_DOCS_RELEASE_URL` | this repository's `v1.0-data` release | Mirror for the data files; the SHA-256 checks still apply |
 | `HTTPS_PROXY` / `HTTP_PROXY` | *(unset)* | Proxy for the embedding and rerank calls |
 
 Pass them through the `env` block of your MCP host's server entry.
+
+Privacy: with an embedding, Cohere or TypeSafe key the query text and the
+candidate API entries (public documentation) are sent to that provider. Keep
+queries to API names and generic task descriptions, in English.
 
 Data set: the SQLite databases and ChromaDB indexes were built from the Revit
 2026 API CHM and the Revit 2026 SDK samples with the pipeline in `pipeline/`

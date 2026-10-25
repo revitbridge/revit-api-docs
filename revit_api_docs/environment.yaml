@@ -1,0 +1,292 @@
+# Development-environment notes for Revit add-in work, curated by hand.
+#
+# Shipped with the package and matched lexically by revit_api_docs.environment
+# (the keyword search's token rules); never embedded, no API key or data set
+# needed. search_revit_api appends up to five matching notes; the
+# `revit-api-docs environment [query] [--revit 2027]` command prints them.
+#
+# Each note:
+#   id      unique, stable
+#   text    one or two English sentences, self-contained
+#   revit   Revit releases the note applies to: space-separated bounds
+#           (">=2025 <2028"), alternatives joined by "||", "*" for any
+#   tags    lower-case keywords; a query word equal to a tag is a strong hit,
+#           a word that only appears in the text a weak one
+#   source  https URL the fact was checked against (2026-10-24)
+#
+# Keep it small (20-40 notes) and factual: when a fact is not verified, leave
+# it out rather than guessing. Text is English only, ASCII only.
+
+notes:
+  - id: revit-2027-framework
+    text: >-
+      Revit 2027 runs on .NET 10: add-ins target net10.0-windows. There is no
+      .NET 8 variant of Revit 2027, so a net8.0-windows project for 2027 is a
+      mismatch.
+    revit: ">=2027 <2028"
+    tags: [framework, tfm, runtime, dotnet, net10]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-sdk
+    text: >-
+      All Revit 2027 add-ins must be built against the .NET 10 SDK. When
+      porting from .NET 8, review Microsoft's .NET 9 and .NET 10
+      breaking-change lists, then rebuild and test in Revit 2027.
+    revit: ">=2027 <2028"
+    tags: [sdk, dotnet, build, migration, net10]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-global-json
+    text: >-
+      Autodesk's Revit 2027 SDK samples pin the .NET SDK with a global.json:
+      {"sdk": {"version": "10.0.100", "rollForward": "minor"}}. rollForward
+      "minor" accepts a newer 10.x SDK but never an 11.x one.
+    revit: ">=2027 <2028"
+    tags: [sdk, global.json, build, dotnet, net10]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-isolation-types
+    text: >-
+      Revit 2027 adds add-in dependency and isolation types to the API:
+      AddInDependencyBase, ClientIdDependency and ContextNameDependency. They
+      declare how add-ins depend on each other and how assemblies are shared
+      between add-ins.
+    revit: ">=2027 <2028"
+    tags: [isolation, dependency, manifest, api-changes]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-manifest-settings
+    text: >-
+      Revit 2027 .addin manifests gain assembly-sharing settings:
+      PublicAssemblies (the sample lists the add-in's API assemblies there),
+      Dependencies (dependsonclientid and dependsoncontext entries naming
+      assemblies) and UseAllContextsForDependencyResolution. Autodesk shows them
+      only in a sample; check the 2027 SDK documentation before relying on
+      their exact semantics.
+    revit: ">=2027 <2028"
+    tags: [manifest, isolation, dependency, deploy]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-all-users-addins-folder
+    text: >-
+      Revit 2027 moves the all-users add-in folder from ProgramData to Program
+      Files; per-user add-in folders still work. Application.AllUsersAddinsLocation
+      returns the new location, so do not hard-code the old path.
+    revit: ">=2027 <2028"
+    tags: [manifest, deploy, folder, install]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2027-ca1416
+    text: >-
+      Building the Revit 2027 SDK samples can raise CA1416 platform-compatibility
+      warnings; Autodesk's fix is a shared assembly attribute
+      [assembly: SupportedOSPlatform("windows")] included from SDKSamples.props.
+    revit: ">=2027 <2028"
+    tags: [build, msbuild, csproj, warning]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: revit-2024-framework
+    text: >-
+      Revit 2024 add-ins run on .NET Framework 4.8: the target framework is
+      net48. Assemblies built for .NET 8 or .NET 10 do not load in Revit 2024.
+    revit: ">=2024 <2025"
+    tags: [framework, tfm, runtime, dotnet, net48]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Getting_Started/Using_the_Autodesk_Revit_API/Revit_API_Revit_API_Developers_Guide_Introduction_Getting_Started_Using_the_Autodesk_Revit_API_NET8_Update_html.html
+
+  - id: revit-2025-framework
+    text: >-
+      Revit 2025 (releases before 2025.5) runs on .NET 8: add-ins target
+      net8.0-windows and are built with a .NET 8 SDK or newer. .NET Framework
+      4.8 (net48) add-ins must be migrated.
+    revit: ">=2025 <2025.5"
+    tags: [framework, tfm, runtime, dotnet, net8]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Getting_Started/Using_the_Autodesk_Revit_API/Revit_API_Revit_API_Developers_Guide_Introduction_Getting_Started_Using_the_Autodesk_Revit_API_NET8_Update_html.html
+
+  - id: revit-2026-framework
+    text: >-
+      Revit 2026 (releases before 2026.5) runs on .NET 8: add-ins target
+      net8.0-windows, the same as Revit 2025.
+    revit: ">=2026 <2026.5"
+    tags: [framework, tfm, runtime, dotnet, net8]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Getting_Started/Using_the_Autodesk_Revit_API/Revit_API_Revit_API_Developers_Guide_Introduction_Getting_Started_Using_the_Autodesk_Revit_API_NET8_Update_html.html
+
+  - id: revit-dot5-framework
+    text: >-
+      Revit 2025.5 and Revit 2026.5 run on .NET 10 instead of .NET 8: add-ins
+      built for them target net10.0-windows and need a .NET 10 SDK. Keep that
+      output separate from the .NET 8 build of the same Revit year.
+    revit: ">=2025.5 <2026 || >=2026.5 <2027"
+    tags: [framework, tfm, runtime, dotnet, net10]
+    source: https://blog.autodesk.io/autodesk-desktop-products-2025-2026-net-10-updates/
+
+  - id: revit-dot5-no-api-changes
+    text: >-
+      The 2025.5 and 2026.5 updates change only the runtime (.NET 8 to .NET 10);
+      Autodesk states there are no Revit API changes. Existing add-ins keep
+      working unless a .NET 10 breaking change affects them; those must be
+      recompiled and retargeted to .NET 10.
+    revit: ">=2025.5 <2026 || >=2026.5 <2027"
+    tags: [runtime, migration, upgrade, api-changes, net10]
+    source: https://blog.autodesk.io/autodesk-desktop-products-2025-2026-net-10-updates/
+
+  - id: revit-dot5-reference-assemblies
+    text: >-
+      Do not compile a 2026.5 (or 2025.5) project against the 2026.0 (or 2025.0)
+      reference assemblies or packages just to get a successful build: those
+      belong to the .NET 8 release, while the .5 release runs on .NET 10.
+      Reference the RevitAPI.dll and RevitAPIUI.dll of the release you target.
+    revit: ">=2025.5 <2026 || >=2026.5 <2027"
+    tags: [nuget, package, build, framework, net10]
+    source: https://blog.autodesk.io/autodesk-desktop-products-2025-2026-net-10-updates/
+
+  - id: dotnet8-end-of-support
+    text: >-
+      Microsoft ends support for .NET 8 (and .NET 9) on 2026-11-10. Revit 2025
+      and 2026 projects that target net8.0-windows should plan the move to
+      2025.5 / 2026.5 and net10.0-windows.
+    revit: ">=2025 <2025.5 || >=2026 <2026.5"
+    tags: [lifecycle, upgrade, dotnet, net8, end-of-support]
+    source: https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core
+
+  - id: dotnet10-lts
+    text: >-
+      .NET 10 is a long-term support release, supported by Microsoft until
+      2028-11-14. It is the runtime of Revit 2025.5, 2026.5 and 2027.
+    revit: ">=2025.5 <2026 || >=2026.5 <2028"
+    tags: [lifecycle, dotnet, runtime, net10]
+    source: https://dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core
+
+  - id: revit-2025-installs-runtime
+    text: >-
+      Installing Revit 2025 also installs the .NET 8 Windows Desktop Runtime
+      (x64); Autodesk built Revit 2025 itself with .NET SDK 8.0.100.
+    revit: ">=2025 <2025.5"
+    tags: [runtime, sdk, dotnet, install, net8]
+    source: https://blog.autodesk.io/revit-2025-dotnet8-migration/
+
+  - id: runtime-is-not-sdk
+    text: >-
+      Revit installs the .NET Desktop Runtime it needs, not a .NET SDK. A machine
+      that runs Revit can load add-ins but cannot build them until a matching
+      SDK is installed (https://dotnet.microsoft.com/download).
+    revit: ">=2025 <2028"
+    tags: [runtime, sdk, install, dotnet]
+    source: https://blog.autodesk.io/revit-2025-dotnet8-migration/
+
+  - id: dotnet-list-sdks
+    text: >-
+      Run dotnet --list-sdks to see the installed .NET SDKs (dotnet
+      --list-runtimes for runtimes). net8.0-windows projects need an 8.0 SDK or
+      newer; net10.0-windows projects need a 10.0 SDK. An SDK builds for its own
+      and older target frameworks, never for newer ones.
+    revit: ">=2025 <2028"
+    tags: [sdk, dotnet, runtime, install, build]
+    source: https://learn.microsoft.com/en-us/dotnet/core/install/how-to-detect-installed-versions
+
+  - id: local-runtime-check
+    text: >-
+      To see which .NET a local Revit installation runs on, open the
+      runtimeconfig JSON in the Revit program folder (for example
+      RevitAPI.runtimeconfig.json): runtimeOptions names the framework and its
+      version (8.0.x is .NET 8, 10.0.x is .NET 10). The RevitAPI.dll file
+      version tells a .0 release from its .5 update.
+    revit: ">=2025 <2028"
+    tags: [runtime, dotnet, install, runtimeconfig]
+    source: https://learn.microsoft.com/en-us/dotnet/core/runtime-config/
+
+  - id: build-per-release
+    text: >-
+      Build each Revit target against that release's own RevitAPI.dll and
+      RevitAPIUI.dll and its framework (net48, net8.0-windows or
+      net10.0-windows); one successful build does not show the add-in works in
+      another Revit release. Reference the Autodesk assemblies with Private
+      false (Copy Local off) and do not ship them with the add-in.
+    revit: ">=2024 <2028"
+    tags: [build, framework, csproj, deploy, msbuild]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Getting_Started/Using_the_Autodesk_Revit_API/Revit_API_Revit_API_Developers_Guide_Introduction_Getting_Started_Using_the_Autodesk_Revit_API_NET8_Update_html.html
+
+  - id: nice3point-packages
+    text: >-
+      Revit reference assemblies are also published on NuGet as
+      Nice3point.Revit.Api.RevitAPI and Nice3point.Revit.Api.RevitAPIUI
+      (siblings include RevitAPIIFC, RevitAPIMacros, AdWindows and UIFramework).
+      The package version follows the Revit year: 2027.x targets
+      net10.0-windows. Pin the version that matches your Revit target.
+    revit: ">=2024 <2028"
+    tags: [nuget, package, build, nice3point]
+    source: https://www.nuget.org/packages/Nice3point.Revit.Api.RevitAPI
+
+  - id: migrate-from-net48
+    text: >-
+      Moving an add-in from Revit 2024 (.NET Framework 4.8) to Revit 2025 or
+      later means retargeting to net8.0-windows or net10.0-windows and replacing
+      dependencies that exist only for .NET Framework; Autodesk's .NET 8
+      migration guide lists the steps.
+    revit: ">=2025 <2028"
+    tags: [migration, upgrade, framework, net48, net8]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Getting_Started/Using_the_Autodesk_Revit_API/Revit_API_Revit_API_Developers_Guide_Introduction_Getting_Started_Using_the_Autodesk_Revit_API_NET8_Update_html.html
+
+  - id: csproj-windows-desktop
+    text: >-
+      net8.0-windows and net10.0-windows add-ins with a WPF or WinForms UI set
+      UseWPF or UseWindowsForms to true in the csproj. Revit is a 64-bit
+      application, so build for x64.
+    revit: ">=2025 <2028"
+    tags: [csproj, build, wpf, msbuild, x64]
+    source: https://learn.microsoft.com/en-us/dotnet/core/project-sdk/msbuild-props-desktop
+
+  - id: addin-folders
+    text: >-
+      Revit reads .addin manifests from the per-user folder
+      %APPDATA%\Autodesk\Revit\Addins\<year>\ and the all-users folder
+      %ProgramData%\Autodesk\Revit\Addins\<year>\ (Program Files from Revit
+      2027). Each Revit year reads only its own folder, so ship one manifest per
+      supported year, each pointing to the DLL built for that year.
+    revit: ">=2024 <2027"
+    tags: [manifest, deploy, folder, install]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Add_In_Integration/Revit_API_Revit_API_Developers_Guide_Introduction_Add_In_Integration_Add_in_Registration_html.html
+
+  - id: addin-manifest-fields
+    text: >-
+      An .addin manifest entry (AddIn Type="Command" or "Application") needs
+      Assembly (path to the DLL), FullClassName (namespace and class of the
+      IExternalCommand or IExternalApplication), a unique and stable AddInId
+      GUID, and VendorId.
+    revit: ">=2024 <2028"
+    tags: [manifest, deploy, addinid]
+    source: https://help.autodesk.com/cloudhelp/2026/ENU/Revit-API/files/Revit_API_Developers_Guide/Introduction/Add_In_Integration/Revit_API_Revit_API_Developers_Guide_Introduction_Add_In_Integration_Add_in_Registration_html.html
+
+  - id: api-data-set-release
+    text: >-
+      The API reference behind search_revit_api is the Revit 2026 one. Other
+      releases differ: APIs added in Revit 2027 (for example
+      AddInDependencyBase) are missing from it, and members added in 2026 may
+      not exist in 2024 or 2025. Check the API changes of the release you
+      target.
+    revit: ">=2024 <2026 || >=2027 <2028"
+    tags: [api-changes, data-set, whats-new]
+    source: https://blog.autodesk.io/revit-2027-sdk-net-10-api-changes-and-additions/
+
+  - id: jev-rerank-provider
+    text: >-
+      search_revit_api can rerank with TypeSafe Jev (System One, alias
+      jev-latest; jev-1.13 and newer): REVIT_API_DOCS_RERANK_PROVIDER=jev plus
+      TYPESAFE_API_KEY. Each candidate gets a calibrated 0-1 probability; with
+      REVIT_API_DOCS_MIN_RELEVANCE set the tool says when nothing matched.
+      Context: 64k tokens per request, 32k per question; billed per input token
+      ($0.042 per million); rate limits are set per organization (HTTP 429);
+      API only, no self-hosting; no data-retention policy found (2026-10-24).
+    revit: "*"
+    tags: [rerank, jev, typesafe, relevance]
+    source: https://docs.typesafe.ai/models.md
+
+  - id: jev-rerank-ecosystem
+    text: >-
+      Open-source Jev rerank helpers exist: jev-reranker on PyPI (MIT, Python
+      3.11+, relevance_rerank(query, docs, threshold)) and hev/jev-rerank
+      (Apache-2.0, at most 30 documents per call). revit-api-docs calls the
+      System One HTTP API directly and also sends at most 30 candidates per
+      request.
+    revit: "*"
+    tags: [rerank, jev, typesafe]
+    source: https://pypi.org/project/jev-reranker/
