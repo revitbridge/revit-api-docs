@@ -10,7 +10,9 @@ import pytest
 
 from revit_api_docs import data
 
-KEY_VARS = ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY")
+KEY_VARS = ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY", "TYPESAFE_API_KEY")
+# Rerank settings a developer may have exported; tests choose their own.
+RERANK_VARS = ("REVIT_API_DOCS_RERANK_PROVIDER", "REVIT_API_DOCS_MIN_RELEVANCE", "REVIT_API_DOCS_JEV_MODEL")
 
 API_ROWS = [
     # (name, full_id, summary, syntax, parameters, remark)
@@ -97,10 +99,17 @@ def tiny_data_dir(tiny_dbs, tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _no_jev_or_rerank_overrides(monkeypatch):
+    """No test reaches TypeSafe by accident or inherits a rerank override."""
+    for name in ("TYPESAFE_API_KEY", *RERANK_VARS):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def no_key_env() -> dict[str, str]:
-    """os.environ without any embedding/rerank key, for subprocesses."""
-    return {k: v for k, v in os.environ.items() if k not in KEY_VARS}
+    """os.environ without any embedding/rerank key or rerank override, for subprocesses."""
+    return {k: v for k, v in os.environ.items() if k not in KEY_VARS + RERANK_VARS}
 
 
 @pytest.fixture

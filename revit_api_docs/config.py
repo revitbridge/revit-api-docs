@@ -7,6 +7,10 @@ The dict keeps the shape the retriever and the pipeline tools expect
 (`embedding.models.<provider>`, `llm.models.<provider>`, `rerank`, `retrieval`,
 `sdk`); API keys are looked up by the environment variable named in
 `api_key_env`, never stored in the dict.
+
+Rerank overrides: REVIT_API_DOCS_RERANK_PROVIDER (cohere | jev | none),
+REVIT_API_DOCS_JEV_MODEL (default jev-latest) and REVIT_API_DOCS_MIN_RELEVANCE
+(a probability 0-1, or "none"; honoured only while Jev answers).
 """
 from __future__ import annotations
 
@@ -21,6 +25,9 @@ ENV_EMBEDDING_API_KEY = "REVIT_API_DOCS_EMBEDDING_API_KEY"
 ENV_EMBEDDING_BASE_URL = "REVIT_API_DOCS_EMBEDDING_BASE_URL"
 ENV_EMBEDDING_MODEL = "REVIT_API_DOCS_EMBEDDING_MODEL"
 ENV_EMBEDDING_PROVIDER = "REVIT_API_DOCS_EMBEDDING_PROVIDER"
+ENV_RERANK_PROVIDER = "REVIT_API_DOCS_RERANK_PROVIDER"
+ENV_JEV_MODEL = "REVIT_API_DOCS_JEV_MODEL"
+ENV_MIN_RELEVANCE = "REVIT_API_DOCS_MIN_RELEVANCE"
 
 # Keys tried, in order, when REVIT_API_DOCS_EMBEDDING_API_KEY is unset.
 EMBEDDING_KEY_FALLBACKS = ("OPENROUTER_API_KEY",)
@@ -60,6 +67,25 @@ def apply_env_overrides(config: dict[str, Any], env: os._Environ[str] | dict[str
                     break
             else:
                 model_cfg.setdefault("api_key_env", ENV_EMBEDDING_API_KEY)
+
+    _apply_rerank_overrides(config, env)
+
+
+def _apply_rerank_overrides(config: dict[str, Any], env: os._Environ[str] | dict[str, str]) -> None:
+    """Provider choice, Jev model and the abstention threshold from the environment.
+
+    The threshold is stored as given; the retriever validates it (a bad value
+    is logged and ignored rather than stopping the server).
+    """
+    rerank = config.setdefault("rerank", {})
+    if env.get(ENV_RERANK_PROVIDER):
+        rerank["provider"] = env[ENV_RERANK_PROVIDER].strip().lower()
+    if env.get(ENV_JEV_MODEL):
+        jev = rerank.setdefault("models", {}).setdefault("jev", {})
+        jev["model"] = env[ENV_JEV_MODEL].strip()
+    threshold = (env.get(ENV_MIN_RELEVANCE) or "").strip()
+    if threshold:
+        config.setdefault("retrieval", {}).setdefault("api", {})["min_relevance"] = threshold
 
 
 def load_dotenv(root: str | Path | None = None) -> None:

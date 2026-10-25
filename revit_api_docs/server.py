@@ -1,19 +1,24 @@
 """MCP server: two read-only tools over the Revit API reference.
 
     search_revit_api(query, top_k)   -> API entries (signature, parameters, remarks)
+                                        plus matching development-environment notes
     get_code_examples(query, top_k)  -> C# snippets from the official SDK samples
 
 Everything is local once the data set is installed. On the first run the
 server answers immediately and downloads the data set (about 335 MB) in the
 background; tool calls made before it is ready get a short status message
-instead of a result. `revit-api-docs download` fetches it ahead of time.
+instead of a result (followed by any matching environment notes, which ship
+with the package). `revit-api-docs download` fetches it ahead of time.
 
-stdout is the MCP transport: all diagnostics go to stderr.
+Transports: stdio (default; stdout is the MCP transport, all diagnostics go to
+stderr) or streamable HTTP (`serve --transport http`), which has no built-in
+authentication.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import logging
 import sys
 import threading
@@ -31,16 +36,26 @@ if TYPE_CHECKING:
 log = logging.getLogger("revit_api_docs.server")
 
 MAX_TOP_K = 50
+DEFAULT_HTTP_HOST = "127.0.0.1"
+DEFAULT_HTTP_PORT = 8765
 
 SERVER_INSTRUCTIONS = """\
 Revit API reference lookup (Revit 2026). Optional companion for models that do
 not know the Revit API well; it never touches a Revit session.
 
+Queries are English only: the reference is the English API documentation.
+Rewrite other languages into English API names or English task keywords
+before calling a tool.
+
 - search_revit_api(query, top_k): find classes, methods, properties and enums
   in the API reference. Ask with API names when you have them
   ("Wall.Create", "FilteredElementCollector OfCategory") or with a short task
   description ("create floor from boundary"). Results carry the signature,
-  parameters and remarks; trust them over memory.
+  parameters and remarks; trust them over memory. The first line names the
+  reranker. When it says no entry matched, the member may not exist in this
+  version: check the name and the Revit version instead of guessing. Questions
+  about the development environment ("target framework for Revit 2027 add-in")
+  also get curated environment notes with sources.
 - get_code_examples(query, top_k): real C# from the Revit SDK samples that use
   the APIs in question. Read one before writing code for an unfamiliar API.
 
@@ -149,10 +164,34 @@ def _clamp_top_k(top_k: int, default: int) -> int:
     return max(1, min(n, MAX_TOP_K))
 
 
+def _with_environment_notes(text: str, query: str) -> str:
+    """Append the matching environment notes (if any) after a blank line."""
+    from revit_api_docs.environment import notes_for_query
+
+    notes = notes_for_query(query)
+    return f"{text}\n\n{notes}" if notes else text
+
+
+def abstention_line(revit_version: str, reason: str) -> str:
+    """First line of search_revit_api output when Jev scored every candidate too low."""
+    return (f"No API entry in the Revit {revit_version} data set matched this query ({reason}). "
+            "The class or member may not exist in this version; check the name and the "
+            "Revit version before writing code.")
+
+
 def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
+    from revit_api_docs.retriever import rerank_label
+
     results = retriever.search(query, api_top_k=top_k, code_top_k=0, rewrite=False, rerank=True)
     ctx = retriever.build_context(results)
-    return ctx.get("api_context") or f"No API entries found for {query!r}."
+    api_context = ctx.get("api_context")
+    if not api_context:
+        return _with_environment_notes(f"No API entries found for {query!r}.", query)
+    head = [f"Rerank: {rerank_label(results)}"]
+    if results.abstained:
+        head = [abstention_line(retriever.revit_version, results.abstain_reason),
+                f"Rerank: {rerank_label(results)}. Low-relevance candidates, for reference only:"]
+    return _with_environment_notes("\n".join(head) + "\n\n" + api_context, query)
 
 
 def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
@@ -167,13 +206,17 @@ def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
 async def search_revit_api(query: str, top_k: int = 10) -> str:
     """Search the Revit 2026 API reference (27,596 classes, methods, properties,
     enums). Returns each match with its signature, parameters and remarks.
-    Query with an API name ("Wall.Create") or a short task ("rotate element
-    around axis"). top_k: 1-50, default 10."""
+    Query in English with an API name ("Wall.Create") or a short task
+    ("rotate element around axis"); the reference is English only, so rewrite
+    other languages into English API keywords first. The first line names the
+    reranker; if it says no entry matched, the member may not exist in this
+    version. Development-environment questions ("target framework for Revit
+    2027 add-in") also get curated environment notes. top_k: 1-50, default 10."""
     if not query or not query.strip():
         return "Give a query: an API name such as 'Wall.Create' or a short task description."
     msg = _state.message_if_not_ready()
     if msg:
-        return msg
+        return _with_environment_notes(msg, query.strip())
     n = _clamp_top_k(top_k, 10)
     return await asyncio.to_thread(search_api, _state.retriever, query.strip(), n)
 
@@ -182,7 +225,8 @@ async def search_revit_api(query: str, top_k: int = 10) -> str:
 async def get_code_examples(query: str, top_k: int = 3) -> str:
     """Return C# examples from the official Revit SDK samples (153 projects)
     that use the APIs matching the query, each with the project name and the
-    APIs it touches. top_k: 1-50, default 3."""
+    APIs it touches. Query in English (API names or a short task); the samples
+    and their summaries are English only. top_k: 1-50, default 3."""
     if not query or not query.strip():
         return "Give a query: an API name or the task the sample should show."
     msg = _state.message_if_not_ready()
@@ -195,7 +239,7 @@ async def get_code_examples(query: str, top_k: int = 3) -> str:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _configure_logging(verbose: bool) -> None:
-    """Plain stderr logging for the `download` and `search` subcommands.
+    """Plain stderr logging for the `download`, `search` and `environment` subcommands.
 
     MCPServer() above already configured the root logger at import time
     (INFO, rich handler), so this must replace that setup (force=True);
@@ -211,24 +255,100 @@ def _configure_logging(verbose: bool) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def is_loopback(host: str) -> bool:
+    """True for localhost and loopback addresses (127.0.0.0/8, ::1)."""
+    h = host.strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _port(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a port number: {text!r}") from None
+    if not 1 <= n <= 65535:
+        raise argparse.ArgumentTypeError(f"port out of range 1-65535: {n}")
+    return n
+
+
+def _revit_release(text: str):
+    from revit_api_docs.environment import parse_version
+
+    try:
+        return parse_version(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def serve(transport: str = "stdio", host: str = DEFAULT_HTTP_HOST, port: int = DEFAULT_HTTP_PORT) -> None:
+    """Start data preparation in the background and run the MCP server."""
+    if transport == "http":
+        if not is_loopback(host):
+            log.warning(
+                "serving MCP over HTTP on %s:%d with no built-in authentication: anyone who can "
+                "reach this address can call the tools. For remote use put it behind a reverse "
+                "proxy that authenticates.", host, port)
+        log.info("MCP streamable HTTP endpoint: http://%s:%d/mcp", host, port)
+        _state.start_background()
+        mcp.run(transport="streamable-http", host=host, port=port)
+        return
+    _state.start_background()
+    mcp.run(transport="stdio")
+
+
+def _print_environment(query: str, revit) -> int:
+    from revit_api_docs import environment
+
+    notes = (environment.match(query, revit=revit, limit=None) if query.strip()
+             else environment.select(revit))
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    for n in notes:
+        print(f"[{n.id}] {environment.describe_range(n)} | tags: {', '.join(n.tags)}")
+        print(f"  {n.text}")
+        print(f"  source: {n.source}")
+        print()
+    where = f" for Revit {environment.format_version(revit)}" if revit else ""
+    print(f"{len(notes)} environment note(s){where}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="revit-api-docs",
-        description="MCP server for Revit API reference search (stdio).",
+        description="MCP server for Revit API reference search (stdio by default, or streamable HTTP).",
     )
     parser.add_argument("--version", action="version", version=f"revit-api-docs {__version__}")
     parser.add_argument("-v", "--verbose", action="store_true", help="info-level logs on stderr")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("serve", help="run the MCP server on stdio (default)")
+    p_serve = sub.add_parser("serve", help="run the MCP server (default; stdio unless --transport http)")
+    p_serve.add_argument("--transport", choices=("stdio", "http"), default="stdio",
+                         help="stdio (default) or http (MCP streamable HTTP at /mcp, no built-in auth)")
+    p_serve.add_argument("--host", default=None,
+                         help=f"bind address for --transport http (default {DEFAULT_HTTP_HOST})")
+    p_serve.add_argument("--port", type=_port, default=None,
+                         help=f"port for --transport http (default {DEFAULT_HTTP_PORT})")
     sub.add_parser("download", help="install the data set now instead of on first use")
     p_search = sub.add_parser("search", help="query from the terminal (installs the data set if needed)")
     p_search.add_argument("query")
     p_search.add_argument("--examples", action="store_true", help="SDK code examples instead of API entries")
     p_search.add_argument("--top-k", type=int, default=None)
+    p_env = sub.add_parser("environment",
+                           help="print the curated development-environment notes (no data set needed)")
+    p_env.add_argument("query", nargs="?", default="", help="only notes this query matches")
+    p_env.add_argument("--revit", type=_revit_release, default=None, metavar="RELEASE",
+                       help="only notes that apply to this Revit release, e.g. 2027 or 2026.5")
     args = parser.parse_args(argv)
 
-    if args.command in ("download", "search"):
+    if args.command in ("download", "search", "environment"):
         _configure_logging(args.verbose)
+
+    if args.command == "environment":
+        return _print_environment(args.query, args.revit)
 
     if args.command == "download":
         paths = data.ensure_data(progress=data.stderr_progress)
@@ -245,8 +365,12 @@ def main(argv: list[str] | None = None) -> int:
         print(text)
         return 0
 
-    _state.start_background()
-    mcp.run(transport="stdio")
+    transport = getattr(args, "transport", "stdio")
+    host = getattr(args, "host", None)
+    port = getattr(args, "port", None)
+    if transport != "http" and (host is not None or port is not None):
+        log.warning("--host and --port apply to --transport http only; serving on stdio")
+    serve(transport, host or DEFAULT_HTTP_HOST, port or DEFAULT_HTTP_PORT)
     return 0
 
 

@@ -18,7 +18,14 @@ Public API:
 Degraded modes (no network keys needed for the MCP server to be useful):
     - No embedding API key  -> vector search is skipped, SQLite keyword search only.
     - No rerank API key     -> results keep vector/keyword order.
+    - Jev call fails        -> Cohere reranks when its key is set, else no rerank;
+                               SearchResults.rerank_used says which one ran.
     - No LLM key            -> query rewriting is skipped.
+
+Abstention: with rerank provider "jev" and retrieval.api.min_relevance set,
+candidates below the threshold are dropped; when none reaches it the result
+is marked abstained (the low-scoring candidates stay for reference). Other
+providers never abstain: their scores are not calibrated probabilities.
 """
 from __future__ import annotations
 
@@ -56,6 +63,9 @@ class RetrievedItem:
     project: str = ""
     content: str = ""         # golden code snippet
     mentioned_apis: str = ""
+    # Calibrated probability (0-1) from a calibrated rerank provider (jev);
+    # None when the order came from any other source.
+    relevance: float | None = None
 
 
 @dataclass
@@ -65,6 +75,14 @@ class SearchResults:
     rewritten_query: str = ""
     api_items: list[RetrievedItem] = field(default_factory=list)
     sdk_items: list[RetrievedItem] = field(default_factory=list)
+    # Which provider ordered api_items: "jev" | "cohere" | "none".
+    rerank_used: str = "none"
+    # Providers tried before rerank_used that were unavailable or failed
+    # (for example ["jev"] when Jev failed and Cohere took over).
+    rerank_skipped: list[str] = field(default_factory=list)
+    # True when Jev scored every candidate below retrieval.api.min_relevance.
+    abstained: bool = False
+    abstain_reason: str = ""  # e.g. "best relevance 0.07 < 0.20"
 
 
 class RAGRetriever:
@@ -104,6 +122,8 @@ class RAGRetriever:
         self._api_rerank_n = ret_cfg.get("api", {}).get("rerank_top_n", 15)
         self._code_top_k = ret_cfg.get("code", {}).get("top_k", 5)
         self._code_rerank_n = ret_cfg.get("code", {}).get("rerank_top_n", 3)
+        self._min_relevance = self._parse_min_relevance(ret_cfg.get("api", {}).get("min_relevance"))
+        self._revit_version = str(config.get("revit_version", "2026"))
 
         # ChromaDB collections are opened on the first vector query (see
         # _open_collections); without an embedder they are never touched.
@@ -157,8 +177,8 @@ class RAGRetriever:
         self._rewrite_client = None
         self._rewrite_unavailable = False
 
-        # Reranker (lazy init from config)
-        self._reranker = None
+        # Rerank providers, tried in order (lazy init from config)
+        self._rerank_chain: list = []
         self._reranker_initialized = False
 
     def _open_collections(self) -> None:
@@ -192,6 +212,32 @@ class RAGRetriever:
     def vector_search_enabled(self) -> bool:
         return self._embedder is not None
 
+    @property
+    def revit_version(self) -> str:
+        """Revit release the data set was built from (config `revit_version`)."""
+        return self._revit_version
+
+    @property
+    def min_relevance(self) -> float | None:
+        return self._min_relevance
+
+    def _parse_min_relevance(self, value: Any) -> float | None:
+        """None / "none" / "" -> no threshold; otherwise a number in [0, 1]."""
+        if value is None or (isinstance(value, str)
+                             and value.strip().lower() in ("", "none", "null", "off")):
+            return None
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            self._log.warning(f"retrieval.api.min_relevance={value!r} is not a number; "
+                              "abstention is off")
+            return None
+        if not 0.0 <= threshold <= 1.0:
+            self._log.warning(f"retrieval.api.min_relevance={value!r} is outside 0-1; "
+                              "abstention is off")
+            return None
+        return threshold
+
     def _detect_sdk_schema(self) -> bool:
         """Check if sdk_db uses the new sdk_info table."""
         if not os.path.exists(self._sdk_db):
@@ -206,17 +252,21 @@ class RAGRetriever:
         finally:
             conn.close()
 
-    def _get_reranker(self):
-        """Lazy-init reranker from config."""
+    def _get_rerank_chain(self) -> list:
+        """Lazy-init the rerank providers from config (empty list: no rerank)."""
         if not self._reranker_initialized:
             self._reranker_initialized = True
             try:
-                from .reranker import create_reranker
-                self._reranker = create_reranker(self._config)
+                from .reranker import configured_provider, create_rerank_chain
+                self._rerank_chain = create_rerank_chain(self._config)
+                configured = configured_provider(self._config)
+                if self._min_relevance is not None and configured != "jev":
+                    self._log.info("retrieval.api.min_relevance is ignored with rerank provider "
+                                   f"{configured!r} (only jev returns calibrated scores)")
             except Exception as e:
-                self._log.warning(f"[_get_reranker] failed to init: {e}")
-                self._reranker = None
-        return self._reranker
+                self._log.warning(f"[_get_rerank_chain] failed to init: {e}")
+                self._rerank_chain = []
+        return self._rerank_chain
 
     # ------------------------------------------------------------------
     # Query rewriting
@@ -368,10 +418,21 @@ class RAGRetriever:
             # Re-sort by distance after merging
             api_items.sort(key=lambda x: x.distance)
 
-        # Tier 3: Rerank (only in full mode)
+        # Tier 3: Rerank (only in full mode); the first provider that answers wins
         t_rerank = 0.0
-        reranker = self._get_reranker() if use_rerank else None
-        if reranker and api_items:
+        rerank_used = "none"
+        rerank_skipped: list[str] = []
+        abstained = False
+        abstain_reason = ""
+        chain = self._get_rerank_chain() if use_rerank else []
+        if use_rerank and api_items:
+            from .reranker import configured_provider
+            if configured_provider(self._config) == "jev" and not any(p.name == "jev" for p in chain):
+                rerank_skipped.append("jev")  # selected, but no key or no config
+        reranked_ok = False
+        if chain and api_items:
+            from .reranker import RerankError
+
             t_rr_start = _time.monotonic()
             # Build document texts for reranking
             api_docs = []
@@ -381,20 +442,43 @@ class RAGRetriever:
                     doc += f" | {item.syntax}"
                 api_docs.append(doc)
 
-            reranked = reranker.rerank(query, api_docs, top_n=final_api_n)
-            # Reorder api_items by rerank scores
-            reranked_items = []
-            for rr in reranked:
-                if rr.index < len(api_items):
-                    item = api_items[rr.index]
-                    item.distance = 1.0 - rr.score  # convert score to distance
-                    reranked_items.append(item)
-            api_items = reranked_items
+            for provider in chain:
+                try:
+                    reranked = provider.rerank(query, api_docs, top_n=final_api_n, strict=True)
+                except RerankError as e:
+                    nxt = "trying the next one" if provider is not chain[-1] else "keeping the retrieval order"
+                    self._log.warning(f"[search] rerank provider {provider.name} failed ({e}); {nxt}")
+                    rerank_skipped.append(provider.name)
+                    continue
+                # Reorder api_items by rerank scores
+                calibrated = bool(getattr(provider, "calibrated", False))
+                reranked_items = []
+                for rr in reranked:
+                    if rr.index < len(api_items):
+                        item = api_items[rr.index]
+                        item.distance = 1.0 - rr.score  # convert score to distance
+                        item.relevance = rr.score if calibrated else None
+                        reranked_items.append(item)
+                api_items = reranked_items
+                rerank_used = provider.name
+                reranked_ok = True
+
+                # Abstention: only calibrated scores may be held to a fixed threshold.
+                if calibrated and self._min_relevance is not None and api_items:
+                    passing = [i for i in api_items if (i.relevance or 0.0) >= self._min_relevance]
+                    if passing:
+                        api_items = passing
+                    else:
+                        best = max(i.relevance or 0.0 for i in api_items)
+                        abstained = True
+                        abstain_reason = f"best relevance {best:.2f} < {self._min_relevance:.2f}"
+                break
             t_rerank = _time.monotonic() - t_rr_start
-            self._log.info(f"[search] reranked {len(api_docs)} → {len(api_items)} "
-                           f"in {t_rerank:.2f}s")
-        else:
-            # No reranker — just trim to final count
+            self._log.info(f"[search] rerank={rerank_used} {len(api_docs)} -> {len(api_items)} "
+                           f"in {t_rerank:.2f}s"
+                           + (f" abstained ({abstain_reason})" if abstained else ""))
+        if not reranked_ok:
+            # No reranker (or every provider failed): just trim to final count
             api_items = api_items[:final_api_n]
 
         sdk_items = sdk_items[:final_code_n]
@@ -410,6 +494,8 @@ class RAGRetriever:
         return SearchResults(
             query=query, rewritten_query=search_query,
             api_items=api_items, sdk_items=sdk_items,
+            rerank_used=rerank_used, rerank_skipped=rerank_skipped,
+            abstained=abstained, abstain_reason=abstain_reason,
         )
 
     # ------------------------------------------------------------------
@@ -574,7 +660,8 @@ class RAGRetriever:
         "arc", "point", "solid", "face", "edge", "geometry",
     })
 
-    def _normalize_search_tokens(self, query: str) -> list[tuple[str, float]]:
+    @classmethod
+    def _normalize_search_tokens(cls, query: str) -> list[tuple[str, float]]:
         """Extract and weight search tokens from a natural-language query.
 
         Returns list of (token, weight) tuples where:
@@ -589,21 +676,21 @@ class RAGRetriever:
 
         for token in raw_tokens:
             # Stem verbs first
-            stemmed = self._VERB_STEMS.get(token, token)
+            stemmed = cls._VERB_STEMS.get(token, token)
 
             # Skip stop words only when BOTH the original token and its stem are
             # stop words (so verb forms like "gets"→"get" that are also action
             # stems can survive if the stem is meaningful elsewhere).
-            if token in self._STOP_WORDS and stemmed in self._STOP_WORDS:
+            if token in cls._STOP_WORDS and stemmed in cls._STOP_WORDS:
                 continue
 
             if stemmed in seen:
                 continue
             seen.add(stemmed)
 
-            if stemmed in self._ENTITY_NOUNS:
+            if stemmed in cls._ENTITY_NOUNS:
                 weighted.append((stemmed, 2.0))
-            elif token in self._VERB_STEMS:
+            elif token in cls._VERB_STEMS:
                 # It was a verb form → stemmed action verb
                 weighted.append((stemmed, 1.0))
             else:
@@ -853,6 +940,9 @@ class RAGRetriever:
             if not body_parts and item.info:
                 body_parts.append(item.info)
             body = "\n".join(body_parts)[:api_max_chars]
+            if item.relevance is not None:
+                # First line, outside the truncated body, so it is never cut off.
+                body = f"Relevance: {item.relevance:.2f}" + ("\n" + body if body else "")
             api_parts.append(f"### {header}\n{body}")
 
         code_parts = []
@@ -874,7 +964,9 @@ class RAGRetriever:
 
     def format_results(self, results: SearchResults) -> str:
         """Format search results for display."""
-        lines = []
+        lines = [f"rerank:    {rerank_label(results)}"]
+        if results.abstained:
+            lines.append(f"abstained: {results.abstain_reason}")
         if results.rewritten_query and results.rewritten_query != results.query:
             lines.append(f"query:     {results.query}")
             lines.append(f"rewritten: {results.rewritten_query}")
@@ -884,7 +976,8 @@ class RAGRetriever:
         lines.append("=" * 60)
         for i, item in enumerate(results.api_items, 1):
             sim = 1 - item.distance
-            lines.append(f"\n[{i}] similarity: {sim:.4f}")
+            rel = f"  relevance: {item.relevance:.2f}" if item.relevance is not None else ""
+            lines.append(f"\n[{i}] similarity: {sim:.4f}{rel}")
             lines.append(f"    name:    {item.full_id or item.name}")
             lines.append(f"    summary: {item.summary[:150]}...")
 
@@ -901,3 +994,15 @@ class RAGRetriever:
                 lines.append(f"    code:    {preview}...")
 
         return "\n".join(lines)
+
+
+def rerank_label(results: SearchResults) -> str:
+    """`jev`, `cohere` or `none`, plus the providers that were skipped, if any."""
+    if results.rerank_skipped:
+        return f"{results.rerank_used} (unavailable: {', '.join(results.rerank_skipped)})"
+    return results.rerank_used
+
+
+def normalize_search_tokens(query: str) -> list[tuple[str, float]]:
+    """The keyword search's (token, weight) list: stop words removed, verbs stemmed."""
+    return RAGRetriever._normalize_search_tokens(query)

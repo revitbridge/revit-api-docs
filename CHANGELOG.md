@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Jev rerank provider (TypeSafe System One, `POST https://api.typesafe.ai/v1/systemone`,
+  one `noul` question per candidate): `REVIT_API_DOCS_RERANK_PROVIDER=jev` with
+  `TYPESAFE_API_KEY`. Up to 30 candidates per request, 2 requests in flight,
+  2 retries with backoff on 429/529/5xx/timeouts, 20 s timeout. A failed or
+  unconfigured Jev call falls back to Cohere (when `COHERE_API_KEY` is set) or
+  to no reranking.
+- `search_revit_api` output starts with the reranker that ran
+  (`Rerank: jev | cohere | none`, plus `(unavailable: jev)` after a fallback);
+  Jev-ranked entries carry `Relevance: 0.00-1.00`.
+- Abstention: with Jev and `REVIT_API_DOCS_MIN_RELEVANCE`, entries below the
+  threshold are dropped and, when none reaches it, the output starts with
+  "No API entry in the Revit 2026 data set matched this query (best relevance
+  x < y)" followed by the low-scoring candidates. Other providers never abstain.
+- Streamable HTTP transport: `revit-api-docs serve --transport http --host
+  127.0.0.1 --port 8765` (endpoint `/mcp`); stdio remains the default. A
+  non-loopback `--host` logs a warning: there is no built-in authentication.
+- Development-environment notes: a curated English corpus shipped with the
+  package (`environment.yaml`: target framework, SDK, manifest, reference
+  packages for Revit 2024-2027, each with a release range and a source URL),
+  matched by keywords. `search_revit_api` appends up to five matching notes,
+  also while the data set is still downloading and without any key;
+  `revit-api-docs environment [query] [--revit 2027]` prints them.
+
 ### Changed
 
 - The embedding providers look up their API key before importing the SDK, so
@@ -17,6 +42,10 @@ All notable changes to this project are documented here. The format follows
   logged at INFO instead of WARNING.
 - Download progress: on a terminal the line is redrawn in place; in host logs
   and pipes one line per 10% instead of one per second.
+- Tool descriptions and the server instructions state that queries are English
+  only.
+- The Cohere reranker shares a provider interface with Jev; its requests and
+  its fall-back-to-input-order behaviour are unchanged.
 
 ## [0.1.0] - 2026-09-20
 
