@@ -1,0 +1,614 @@
+# Retrieval regression queries for the Revit 2026 API reference (data release
+# v1.0-data: sqlite/revit_api.db, 27,596 rows). English queries and public API
+# names only; used by tests/test_bm25_recall.py, which needs no network.
+#
+# Groups:
+#   N  an API name, as a model asks once it knows roughly what it wants
+#   T  a short task description in plain English
+#   F  an outdated or wrong API name, or a member put on the wrong class;
+#      the gold is the current API that does the job
+#   X  nothing in the data set answers it (Revit 2027-only types, members that
+#      do not exist, misspellings, non-Revit or non-API questions)
+#
+# Fields:
+#   id, group, query  as above
+#   gold_members      the API members that answer the query (Type.Member, or
+#                     "Type Class" for a class page)
+#   gold              every revit_api row of those members: row id, full_id,
+#                     name. A member can span several rows (the overload-group
+#                     page plus one page per overload); any gold row in the top
+#                     5 counts as a hit
+#   absent            group X only: what must not exist in revit_api.db.
+#                     names: prefix match on name or substring of full_id;
+#                     name_terms: substring of name or full_id; terms: substring
+#                     of any text column
+#   verified          gold rows and absences were checked against revit_api.db
+#   verify_note       what that check found
+#   note              free-text remark
+queries:
+- id: N01
+  group: N
+  query: Wall.Create
+  gold_members: [Wall.Create]
+  gold:
+  - {id: 8802, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean,Autodesk.Revit.DB.XYZ)', name: 'Wall.Create(Document,
+      IList<Curve>, ElementId, ElementId, Boolean, XYZ) Method'}
+  - {id: 13579, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},System.Boolean)', name: 'Wall.Create(Document, IList<Curve>, Boolean) Method'}
+  - {id: 13919, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Double,System.Double,System.Boolean,System.Boolean)', name: 'Wall.Create(Document,
+      Curve, ElementId, ElementId, Double, Double, Boolean, Boolean) Method'}
+  - {id: 21434, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean)', name: 'Wall.Create(Document,
+      IList<Curve>, ElementId, ElementId, Boolean) Method'}
+  - {id: 23245, full_id: Wall.Create, name: Wall.Create Method}
+  - {id: 24320, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.ElementId,System.Boolean)', name: 'Wall.Create(Document, Curve, ElementId, Boolean) Method'}
+  verified: true
+  verify_note: 6 DB rows for 1 member(s)
+- id: N02
+  group: N
+  query: FilteredElementCollector OfCategory
+  gold_members: [FilteredElementCollector.OfCategory]
+  gold:
+  - {id: 26712, full_id: FilteredElementCollector.OfCategory, name: FilteredElementCollector.OfCategory Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N03
+  group: N
+  query: UnitUtils ConvertFromInternalUnits
+  gold_members: [UnitUtils.ConvertFromInternalUnits]
+  gold:
+  - {id: 10043, full_id: UnitUtils.ConvertFromInternalUnits, name: UnitUtils.ConvertFromInternalUnits Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N04
+  group: N
+  query: Transaction Start
+  gold_members: [Transaction.Start]
+  gold:
+  - {id: 2323, full_id: Transaction.Start, name: Transaction.Start Method}
+  - {id: 5560, full_id: 'M:Autodesk.Revit.DB.Transaction.Start', name: Transaction.Start Method}
+  - {id: 19423, full_id: 'M:Autodesk.Revit.DB.Transaction.Start(System.String)', name: Transaction.Start(String) Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+- id: N05
+  group: N
+  query: Document GetElement
+  gold_members: [Document.GetElement]
+  gold:
+  - {id: 10336, full_id: Document.GetElement, name: Document.GetElement Method}
+  - {id: 12376, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(Autodesk.Revit.DB.Reference)', name: Document.GetElement(Reference) Method}
+  - {id: 14133, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(System.String)', name: Document.GetElement(String) Method}
+  - {id: 24510, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(Autodesk.Revit.DB.ElementId)', name: Document.GetElement(ElementId) Method}
+  verified: true
+  verify_note: 4 DB rows for 1 member(s)
+- id: N06
+  group: N
+  query: LocationCurve Curve
+  gold_members: [LocationCurve.Curve]
+  gold:
+  - {id: 13069, full_id: LocationCurve.Curve, name: LocationCurve.Curve Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N07
+  group: N
+  query: ElementId Value
+  gold_members: [ElementId.Value]
+  gold:
+  - {id: 27391, full_id: ElementId.Value, name: ElementId.Value Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N08
+  group: N
+  query: Level Elevation
+  gold_members: [Level.Elevation]
+  gold:
+  - {id: 24863, full_id: Level.Elevation, name: Level.Elevation Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N09
+  group: N
+  query: FamilyInstance Symbol
+  gold_members: [FamilyInstance.Symbol]
+  gold:
+  - {id: 19606, full_id: FamilyInstance.Symbol, name: FamilyInstance.Symbol Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N10
+  group: N
+  query: Parameter AsDouble
+  gold_members: [Parameter.AsDouble]
+  gold:
+  - {id: 5684, full_id: Parameter.AsDouble, name: Parameter.AsDouble Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N11
+  group: N
+  query: Selection.GetElementIds
+  gold_members: [Selection.GetElementIds]
+  gold:
+  - {id: 15036, full_id: Selection.GetElementIds, name: Selection.GetElementIds Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N12
+  group: N
+  query: Floor.Create
+  gold_members: [Floor.Create]
+  gold:
+  - {id: 869, full_id: Floor.Create, name: Floor.Create Method}
+  - {id: 5841, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean,Autodesk.Revit.DB.Line,System.Double)',
+    name: 'Floor.Create(Document, IList<CurveLoop>, ElementId, ElementId, Boolean, Line, Double) Method'}
+  - {id: 11625, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId)', name: 'Floor.Create(Document, IList<CurveLoop>,
+      ElementId, ElementId) Method'}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+- id: N13
+  group: N
+  query: Element LookupParameter
+  gold_members: [Element.LookupParameter]
+  gold:
+  - {id: 20570, full_id: Element.LookupParameter, name: Element.LookupParameter Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N14
+  group: N
+  query: FilteredElementCollector WhereElementIsNotElementType
+  gold_members: [FilteredElementCollector.WhereElementIsNotElementType]
+  gold:
+  - {id: 5854, full_id: FilteredElementCollector.WhereElementIsNotElementType, name: FilteredElementCollector.WhereElementIsNotElementType Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N15
+  group: N
+  query: Curve.Length
+  gold_members: [Curve.Length]
+  gold:
+  - {id: 26948, full_id: Curve.Length, name: Curve.Length Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N16
+  group: N
+  query: UIDocument Selection
+  gold_members: [UIDocument.Selection]
+  gold:
+  - {id: 27453, full_id: UIDocument.Selection, name: UIDocument.Selection Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N17
+  group: N
+  query: Document.Title
+  gold_members: [Document.Title]
+  gold:
+  - {id: 19922, full_id: Document.Title, name: Document.Title Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N18
+  group: N
+  query: FamilySymbol Activate
+  gold_members: [FamilySymbol.Activate]
+  gold:
+  - {id: 5940, full_id: FamilySymbol.Activate, name: FamilySymbol.Activate Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N19
+  group: N
+  query: ElementTransformUtils MoveElement
+  gold_members: [ElementTransformUtils.MoveElement]
+  gold:
+  - {id: 8643, full_id: ElementTransformUtils.MoveElement, name: ElementTransformUtils.MoveElement Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: N20
+  group: N
+  query: taskdialog show
+  gold_members: [TaskDialog.Show]
+  gold:
+  - {id: 8213, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String,Autodesk.Revit.UI.TaskDialogCommonButtons,Autodesk.Revit.UI.TaskDialogResult)', name: 'TaskDialog.Show(String, String, TaskDialogCommonButtons, TaskDialogResult)
+      Method'}
+  - {id: 8265, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String)', name: 'TaskDialog.Show(String, String) Method'}
+  - {id: 10800, full_id: TaskDialog.Show, name: TaskDialog.Show Method}
+  - {id: 11876, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show', name: TaskDialog.Show Method}
+  - {id: 12997, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String,Autodesk.Revit.UI.TaskDialogCommonButtons)', name: 'TaskDialog.Show(String, String, TaskDialogCommonButtons) Method'}
+  verified: true
+  verify_note: 5 DB rows for 1 member(s)
+- id: T01
+  group: T
+  query: length of a wall from its location curve
+  gold_members: [LocationCurve.Curve, Curve.Length, Element.Location]
+  gold:
+  - {id: 13069, full_id: LocationCurve.Curve, name: LocationCurve.Curve Property}
+  - {id: 26948, full_id: Curve.Length, name: Curve.Length Property}
+  - {id: 19352, full_id: Element.Location, name: Element.Location Property}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 2026-10-21 benchmark selection case
+- id: T02
+  group: T
+  query: collect all walls on a level
+  gold_members: [ElementLevelFilter Class, FilteredElementCollector.OfCategory, FilteredElementCollector.OfClass, Element.LevelId]
+  gold:
+  - {id: 22681, full_id: ElementLevelFilter, name: ElementLevelFilter Class}
+  - {id: 26712, full_id: FilteredElementCollector.OfCategory, name: FilteredElementCollector.OfCategory Method}
+  - {id: 21607, full_id: FilteredElementCollector.OfClass, name: FilteredElementCollector.OfClass Method}
+  - {id: 15319, full_id: Element.LevelId, name: Element.LevelId Property}
+  verified: true
+  verify_note: 4 DB rows for 4 member(s)
+- id: T03
+  group: T
+  query: convert feet to millimeters
+  gold_members: [UnitUtils.ConvertFromInternalUnits, UnitUtils.Convert, UnitTypeId.Millimeters]
+  gold:
+  - {id: 10043, full_id: UnitUtils.ConvertFromInternalUnits, name: UnitUtils.ConvertFromInternalUnits Method}
+  - {id: 15769, full_id: UnitUtils.Convert, name: UnitUtils.Convert Method}
+  - {id: 13040, full_id: UnitTypeId.Millimeters, name: UnitTypeId.Millimeters Property}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+- id: T04
+  group: T
+  query: place a door in a wall
+  gold_members: [Document.NewFamilyInstance]
+  gold:
+  - {id: 71, full_id: Document.NewFamilyInstance, name: Document.NewFamilyInstance Method}
+  - {id: 79, full_id: 'M:Autodesk.Revit.Creation.Document.NewFamilyInstance(Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.FamilySymbol,Autodesk.Revit.DB.Level,Autodesk.Revit.DB.Structure.StructuralType)', name: 'Document.NewFamilyInstance(Curve,
+      FamilySymbol, Level, StructuralType) Method'}
+  - {id: 11147, full_id: 'M:Autodesk.Revit.Creation.Document.NewFamilyInstance(Autodesk.Revit.DB.XYZ,Autodesk.Revit.DB.FamilySymbol,Autodesk.Revit.DB.Element,Autodesk.Revit.DB.Level,Autodesk.Revit.DB.Structure.StructuralType)', name: 'Document.NewFamilyInstance(XYZ,
+      FamilySymbol, Element, Level, StructuralType) Method'}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: Autodesk.Revit.Creation.Document
+- id: T05
+  group: T
+  query: read a parameter by name
+  gold_members: [Element.LookupParameter, Element.GetParameters]
+  gold:
+  - {id: 20570, full_id: Element.LookupParameter, name: Element.LookupParameter Method}
+  - {id: 25366, full_id: Element.GetParameters, name: Element.GetParameters Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+- id: T06
+  group: T
+  query: get selected elements
+  gold_members: [Selection.GetElementIds, UIDocument.Selection]
+  gold:
+  - {id: 15036, full_id: Selection.GetElementIds, name: Selection.GetElementIds Method}
+  - {id: 27453, full_id: UIDocument.Selection, name: UIDocument.Selection Property}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 2026-10-21 benchmark selection case
+- id: T07
+  group: T
+  query: create a floor from a boundary
+  gold_members: [Floor.Create]
+  gold:
+  - {id: 869, full_id: Floor.Create, name: Floor.Create Method}
+  - {id: 5841, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean,Autodesk.Revit.DB.Line,System.Double)',
+    name: 'Floor.Create(Document, IList<CurveLoop>, ElementId, ElementId, Boolean, Line, Double) Method'}
+  - {id: 11625, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId)', name: 'Floor.Create(Document, IList<CurveLoop>,
+      ElementId, ElementId) Method'}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+- id: T08
+  group: T
+  query: level elevation in millimeters
+  gold_members: [Level.Elevation, UnitUtils.ConvertFromInternalUnits]
+  gold:
+  - {id: 24863, full_id: Level.Elevation, name: Level.Elevation Property}
+  - {id: 10043, full_id: UnitUtils.ConvertFromInternalUnits, name: UnitUtils.ConvertFromInternalUnits Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 2026-10-21 benchmark levels case
+- id: T09
+  group: T
+  query: count walls in the model
+  gold_members: [FilteredElementCollector.GetElementCount, FilteredElementCollector.OfCategory, FilteredElementCollector.OfClass, FilteredElementCollector Class]
+  gold:
+  - {id: 25273, full_id: FilteredElementCollector.GetElementCount, name: FilteredElementCollector.GetElementCount Method}
+  - {id: 26712, full_id: FilteredElementCollector.OfCategory, name: FilteredElementCollector.OfCategory Method}
+  - {id: 21607, full_id: FilteredElementCollector.OfClass, name: FilteredElementCollector.OfClass Method}
+  - {id: 6728, full_id: FilteredElementCollector, name: FilteredElementCollector Class}
+  verified: true
+  verify_note: 4 DB rows for 4 member(s)
+  note: 2026-10-21 benchmark port case
+- id: T10
+  group: T
+  query: get the title of the active document
+  gold_members: [Document.Title, Document.PathName, UIApplication.ActiveUIDocument]
+  gold:
+  - {id: 19922, full_id: Document.Title, name: Document.Title Property}
+  - {id: 9918, full_id: Document.PathName, name: Document.PathName Property}
+  - {id: 9659, full_id: UIApplication.ActiveUIDocument, name: UIApplication.ActiveUIDocument Property}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 2026-10-21 benchmark selection/levels cases
+- id: T11
+  group: T
+  query: move an element by a vector
+  gold_members: [ElementTransformUtils.MoveElement, ElementTransformUtils.MoveElements]
+  gold:
+  - {id: 8643, full_id: ElementTransformUtils.MoveElement, name: ElementTransformUtils.MoveElement Method}
+  - {id: 4858, full_id: ElementTransformUtils.MoveElements, name: ElementTransformUtils.MoveElements Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+- id: T12
+  group: T
+  query: rotate an element around an axis
+  gold_members: [ElementTransformUtils.RotateElement, ElementTransformUtils.RotateElements]
+  gold:
+  - {id: 25915, full_id: ElementTransformUtils.RotateElement, name: ElementTransformUtils.RotateElement Method}
+  - {id: 10326, full_id: ElementTransformUtils.RotateElements, name: ElementTransformUtils.RotateElements Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+- id: T13
+  group: T
+  query: delete elements from the model
+  gold_members: [Document.Delete]
+  gold:
+  - {id: 5923, full_id: 'M:Autodesk.Revit.DB.Document.Delete(System.Collections.Generic.ICollection{Autodesk.Revit.DB.ElementId})', name: Document.Delete(ICollection<ElementId>) Method}
+  - {id: 18065, full_id: 'M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId)', name: Document.Delete(ElementId) Method}
+  - {id: 23631, full_id: Document.Delete, name: Document.Delete Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+- id: T14
+  group: T
+  query: start a transaction to modify the model
+  gold_members: [Transaction.Start, Transaction Class]
+  gold:
+  - {id: 2323, full_id: Transaction.Start, name: Transaction.Start Method}
+  - {id: 5560, full_id: 'M:Autodesk.Revit.DB.Transaction.Start', name: Transaction.Start Method}
+  - {id: 19423, full_id: 'M:Autodesk.Revit.DB.Transaction.Start(System.String)', name: Transaction.Start(String) Method}
+  - {id: 9074, full_id: Transaction, name: Transaction Class}
+  verified: true
+  verify_note: 4 DB rows for 2 member(s)
+- id: T15
+  group: T
+  query: show a message box to the user
+  gold_members: [TaskDialog.Show]
+  gold:
+  - {id: 8213, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String,Autodesk.Revit.UI.TaskDialogCommonButtons,Autodesk.Revit.UI.TaskDialogResult)', name: 'TaskDialog.Show(String, String, TaskDialogCommonButtons, TaskDialogResult)
+      Method'}
+  - {id: 8265, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String)', name: 'TaskDialog.Show(String, String) Method'}
+  - {id: 10800, full_id: TaskDialog.Show, name: TaskDialog.Show Method}
+  - {id: 11876, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show', name: TaskDialog.Show Method}
+  - {id: 12997, full_id: 'M:Autodesk.Revit.UI.TaskDialog.Show(System.String,System.String,Autodesk.Revit.UI.TaskDialogCommonButtons)', name: 'TaskDialog.Show(String, String, TaskDialogCommonButtons) Method'}
+  verified: true
+  verify_note: 5 DB rows for 1 member(s)
+- id: T16
+  group: T
+  query: create a straight line between two points
+  gold_members: [Line.CreateBound]
+  gold:
+  - {id: 14086, full_id: Line.CreateBound, name: Line.CreateBound Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: T17
+  group: T
+  query: set the value of a parameter
+  gold_members: [Parameter.Set]
+  gold:
+  - {id: 2433, full_id: 'M:Autodesk.Revit.DB.Parameter.Set(Autodesk.Revit.DB.ElementId)', name: Parameter.Set(ElementId) Method}
+  - {id: 8607, full_id: Parameter.Set, name: Parameter.Set Method}
+  - {id: 11785, full_id: 'M:Autodesk.Revit.DB.Parameter.Set(System.String)', name: Parameter.Set(String) Method}
+  - {id: 12140, full_id: 'M:Autodesk.Revit.DB.Parameter.Set(System.Int32)', name: Parameter.Set(Int32) Method}
+  - {id: 24808, full_id: 'M:Autodesk.Revit.DB.Parameter.Set(System.Double)', name: Parameter.Set(Double) Method}
+  verified: true
+  verify_note: 5 DB rows for 1 member(s)
+- id: T18
+  group: T
+  query: get the type of an element
+  gold_members: [Element.GetTypeId, Document.GetElement]
+  gold:
+  - {id: 19754, full_id: Element.GetTypeId, name: Element.GetTypeId Method}
+  - {id: 10336, full_id: Document.GetElement, name: Document.GetElement Method}
+  - {id: 12376, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(Autodesk.Revit.DB.Reference)', name: Document.GetElement(Reference) Method}
+  - {id: 14133, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(System.String)', name: Document.GetElement(String) Method}
+  - {id: 24510, full_id: 'M:Autodesk.Revit.DB.Document.GetElement(Autodesk.Revit.DB.ElementId)', name: Document.GetElement(ElementId) Method}
+  verified: true
+  verify_note: 5 DB rows for 2 member(s)
+- id: T19
+  group: T
+  query: get the bounding box of an element
+  gold_members: [Element.BoundingBox]
+  gold:
+  - {id: 24161, full_id: Element.BoundingBox, name: Element.BoundingBox Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+- id: T20
+  group: T
+  query: get the active view
+  gold_members: [UIDocument.ActiveView, Document.ActiveView]
+  gold:
+  - {id: 1522, full_id: UIDocument.ActiveView, name: UIDocument.ActiveView Property}
+  - {id: 1934, full_id: Document.ActiveView, name: Document.ActiveView Property}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+- id: F01
+  group: F
+  query: Wall LocationCurve
+  gold_members: [Element.Location, LocationCurve.Curve, LocationCurve Class]
+  gold:
+  - {id: 19352, full_id: Element.Location, name: Element.Location Property}
+  - {id: 13069, full_id: LocationCurve.Curve, name: LocationCurve.Curve Property}
+  - {id: 23578, full_id: LocationCurve, name: LocationCurve Class}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 'CS1061: Wall has no LocationCurve member'
+- id: F02
+  group: F
+  query: Element Location curve
+  gold_members: [Element.Location, LocationCurve.Curve, LocationCurve Class]
+  gold:
+  - {id: 19352, full_id: Element.Location, name: Element.Location Property}
+  - {id: 13069, full_id: LocationCurve.Curve, name: LocationCurve.Curve Property}
+  - {id: 23578, full_id: LocationCurve, name: LocationCurve Class}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+- id: F03
+  group: F
+  query: ElementId IntegerValue
+  gold_members: [ElementId.Value]
+  gold:
+  - {id: 27391, full_id: ElementId.Value, name: ElementId.Value Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: IntegerValue removed; replacement is Value
+- id: F04
+  group: F
+  query: Document NewWall
+  gold_members: [Wall.Create]
+  gold:
+  - {id: 8802, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean,Autodesk.Revit.DB.XYZ)', name: 'Wall.Create(Document,
+      IList<Curve>, ElementId, ElementId, Boolean, XYZ) Method'}
+  - {id: 13579, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},System.Boolean)', name: 'Wall.Create(Document, IList<Curve>, Boolean) Method'}
+  - {id: 13919, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Double,System.Double,System.Boolean,System.Boolean)', name: 'Wall.Create(Document,
+      Curve, ElementId, ElementId, Double, Double, Boolean, Boolean) Method'}
+  - {id: 21434, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.Curve},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean)', name: 'Wall.Create(Document,
+      IList<Curve>, ElementId, ElementId, Boolean) Method'}
+  - {id: 23245, full_id: Wall.Create, name: Wall.Create Method}
+  - {id: 24320, full_id: 'M:Autodesk.Revit.DB.Wall.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.ElementId,System.Boolean)', name: 'Wall.Create(Document, Curve, ElementId, Boolean) Method'}
+  verified: true
+  verify_note: 6 DB rows for 1 member(s)
+  note: old API; replacement Wall.Create
+- id: F05
+  group: F
+  query: Document NewFloor
+  gold_members: [Floor.Create]
+  gold:
+  - {id: 869, full_id: Floor.Create, name: Floor.Create Method}
+  - {id: 5841, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,System.Boolean,Autodesk.Revit.DB.Line,System.Double)',
+    name: 'Floor.Create(Document, IList<CurveLoop>, ElementId, ElementId, Boolean, Line, Double) Method'}
+  - {id: 11625, full_id: 'M:Autodesk.Revit.DB.Floor.Create(Autodesk.Revit.DB.Document,System.Collections.Generic.IList{Autodesk.Revit.DB.CurveLoop},Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId)', name: 'Floor.Create(Document, IList<CurveLoop>,
+      ElementId, ElementId) Method'}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: old API; replacement Floor.Create
+- id: F06
+  group: F
+  query: UnitUtils ConvertFromInternalUnits DisplayUnitType
+  gold_members: [UnitUtils.ConvertFromInternalUnits, UnitTypeId Class, ForgeTypeId Class]
+  gold:
+  - {id: 10043, full_id: UnitUtils.ConvertFromInternalUnits, name: UnitUtils.ConvertFromInternalUnits Method}
+  - {id: 14176, full_id: UnitTypeId, name: UnitTypeId Class}
+  - {id: 17450, full_id: ForgeTypeId, name: ForgeTypeId Class}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: DisplayUnitType removed; ForgeTypeId/UnitTypeId
+- id: F07
+  group: F
+  query: Selection Elements
+  gold_members: [Selection.GetElementIds]
+  gold:
+  - {id: 15036, full_id: Selection.GetElementIds, name: Selection.GetElementIds Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: old Selection.Elements; replacement GetElementIds
+- id: F08
+  group: F
+  query: Element get_Parameter string name
+  gold_members: [Element.LookupParameter, Element.GetParameters]
+  gold:
+  - {id: 20570, full_id: Element.LookupParameter, name: Element.LookupParameter Method}
+  - {id: 25366, full_id: Element.GetParameters, name: Element.GetParameters Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: get_Parameter(string) removed; LookupParameter
+- id: F09
+  group: F
+  query: Curve GetLength
+  gold_members: [Curve.Length]
+  gold:
+  - {id: 26948, full_id: Curve.Length, name: Curve.Length Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'CS1061: no GetLength; Length property'
+- id: F10
+  group: F
+  query: Document NewFamilyInstance
+  gold_members: [Document.NewFamilyInstance, Document.Create]
+  gold:
+  - {id: 71, full_id: Document.NewFamilyInstance, name: Document.NewFamilyInstance Method}
+  - {id: 79, full_id: 'M:Autodesk.Revit.Creation.Document.NewFamilyInstance(Autodesk.Revit.DB.Curve,Autodesk.Revit.DB.FamilySymbol,Autodesk.Revit.DB.Level,Autodesk.Revit.DB.Structure.StructuralType)', name: 'Document.NewFamilyInstance(Curve,
+      FamilySymbol, Level, StructuralType) Method'}
+  - {id: 11147, full_id: 'M:Autodesk.Revit.Creation.Document.NewFamilyInstance(Autodesk.Revit.DB.XYZ,Autodesk.Revit.DB.FamilySymbol,Autodesk.Revit.DB.Element,Autodesk.Revit.DB.Level,Autodesk.Revit.DB.Structure.StructuralType)', name: 'Document.NewFamilyInstance(XYZ,
+      FamilySymbol, Element, Level, StructuralType) Method'}
+  - {id: 11761, full_id: Document.Create, name: Document.Create Property}
+  verified: true
+  verify_note: 4 DB rows for 2 member(s)
+  note: CS1061 on DB.Document; use doc.Create.NewFamilyInstance
+- id: X01
+  group: X
+  query: AddInDependencyBase
+  absent:
+    terms: [AddInDependencyBase]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["AddInDependencyBase"]})'
+  note: Revit 2027 only
+- id: X02
+  group: X
+  query: ClientIdDependency
+  absent:
+    terms: [ClientIdDependency]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["ClientIdDependency"]})'
+  note: Revit 2027 only
+- id: X03
+  group: X
+  query: ContextNameDependency
+  absent:
+    terms: [ContextNameDependency]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["ContextNameDependency"]})'
+  note: Revit 2027 only
+- id: X04
+  group: X
+  query: Wall.LocationCurve property
+  absent:
+    names: [Wall.LocationCurve]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["Wall.LocationCurve"]})'
+  note: non-existent member
+- id: X05
+  group: X
+  query: FilteredElementCollector.OfCategoryName
+  absent:
+    names: [FilteredElementCollector.OfCategoryName]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["FilteredElementCollector.OfCategoryName"]})'
+  note: non-existent member
+- id: X06
+  group: X
+  query: Document.GetAllWalls
+  absent:
+    names: [Document.GetAllWalls]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["Document.GetAllWalls"]})'
+  note: non-existent member
+- id: X07
+  group: X
+  query: numpy reshape array
+  absent:
+    terms: [numpy]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["numpy"]})'
+  note: not Revit
+- id: X08
+  group: X
+  query: React useEffect cleanup
+  absent:
+    terms: [useEffect]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["useEffect"]})'
+  note: not Revit
+- id: X09
+  group: X
+  query: Revit keyboard shortcut for trim
+  absent:
+    name_terms: [shortcut, keyboard]
+  verified: true
+  verify_note: 'absent from DB (checked: {"name_terms": ["shortcut", "keyboard"]})'
+  note: 'not the API (UI question). Absence check narrowed on 2026-10-25 before any run: the first verify used terms [shortcut] over all text fields and found the word only in remark prose of 11 rows ("shortcut methods" etc.); no API name or
+    full_id contains shortcut or keyboard'
+- id: X10
+  group: X
+  query: FiltredElementColector
+  absent:
+    terms: [FiltredElementColector, FiltredElement, ElementColector]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["FiltredElementColector", "FiltredElement", "ElementColector"]})'
+  note: misspelling

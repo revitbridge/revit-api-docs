@@ -52,10 +52,11 @@ before calling a tool.
   ("Wall.Create", "FilteredElementCollector OfCategory") or with a short task
   description ("create floor from boundary"). Results carry the signature,
   parameters and remarks; trust them over memory. The first line names the
-  reranker. When it says no entry matched, the member may not exist in this
-  version: check the name and the Revit version instead of guessing. Questions
-  about the development environment ("target framework for Revit 2027 add-in")
-  also get curated environment notes with sources.
+  reranker. When it says no entry scored high enough, either the member is
+  absent from this version or the data set has it under a different name or
+  wording: check the name and the Revit version, or rephrase, instead of
+  guessing. Questions about the development environment ("target framework
+  for Revit 2027 add-in") also get curated environment notes with sources.
 - get_code_examples(query, top_k): real C# from the Revit SDK samples that use
   the APIs in question. Read one before writing code for an unfamiliar API.
 
@@ -173,10 +174,15 @@ def _with_environment_notes(text: str, query: str) -> str:
 
 
 def abstention_line(revit_version: str, reason: str) -> str:
-    """First line of search_revit_api output when Jev scored every candidate too low."""
-    return (f"No API entry in the Revit {revit_version} data set matched this query ({reason}). "
-            "The class or member may not exist in this version; check the name and the "
-            "Revit version before writing code.")
+    """First line of search_revit_api output when Jev scored every candidate too low.
+
+    Neutral on purpose: a low best score cannot tell a member that does not
+    exist from one the keyword or vector search did not bring up.
+    """
+    return (f"No entry in the Revit {revit_version} data set scored high enough for this query "
+            f"({reason}). This can mean the member is absent from this version, or that the "
+            "data set has it under a different name or wording; check the name and version, "
+            "or rephrase.")
 
 
 def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
@@ -209,9 +215,10 @@ async def search_revit_api(query: str, top_k: int = 10) -> str:
     Query in English with an API name ("Wall.Create") or a short task
     ("rotate element around axis"); the reference is English only, so rewrite
     other languages into English API keywords first. The first line names the
-    reranker; if it says no entry matched, the member may not exist in this
-    version. Development-environment questions ("target framework for Revit
-    2027 add-in") also get curated environment notes. top_k: 1-50, default 10."""
+    reranker; if it says no entry scored high enough, the member is either
+    absent from this version or listed under a different name or wording.
+    Development-environment questions ("target framework for Revit 2027
+    add-in") also get curated environment notes. top_k: 1-50, default 10."""
     if not query or not query.strip():
         return "Give a query: an API name such as 'Wall.Create' or a short task description."
     msg = _state.message_if_not_ready()

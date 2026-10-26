@@ -3,44 +3,22 @@
 The two SQLite files (34 MB) are looked up in REVIT_API_DOCS_DATA_DIR or the
 default data directory. When REVIT_API_DOCS_TEST_DOWNLOAD=1 they are fetched
 from the data release into that directory first (CI does this and caches the
-files); otherwise the module is skipped.
+files); otherwise the module is skipped (see conftest.find_shipped_dbs).
 """
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
-from revit_api_docs import data
+from revit_api_docs import server
 from revit_api_docs.config import load_config
 from revit_api_docs.retriever import RAGRetriever
 
 
-def _shipped_dbs() -> tuple[Path, Path] | None:
-    env = os.environ.get("REVIT_API_DOCS_DATA_DIR")
-    roots = [Path(env)] if env else []
-    roots.append(data.default_data_dir())
-    for root in roots:
-        p = data.paths(root)
-        if p.api_db.is_file() and p.sdk_db.is_file():
-            return p.api_db, p.sdk_db
-    if os.environ.get("REVIT_API_DOCS_TEST_DOWNLOAD") == "1":
-        root = roots[0]
-        for art in data.ARTIFACTS:
-            if not art.extract and not (root / art.target).is_file():
-                data.install_artifact(art, root, progress=data.stderr_progress)
-        p = data.paths(root)
-        return p.api_db, p.sdk_db
-    return None
-
-
 @pytest.fixture(scope="module")
-def shipped():
-    found = _shipped_dbs()
-    if found is None:
-        pytest.skip("shipped data set not available (set REVIT_API_DOCS_DATA_DIR or REVIT_API_DOCS_TEST_DOWNLOAD=1)")
-    api_db, sdk_db = found
+def shipped(shipped_dbs):
+    api_db, sdk_db = shipped_dbs
     for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
         os.environ.pop(name, None)
     r = RAGRetriever(load_config(), str(api_db), str(sdk_db), "unused", "unused")
@@ -59,9 +37,12 @@ def test_task_query_finds_floor_create_without_a_key(shipped):
 
 
 def test_task_query_finds_element_transform_utils(shipped):
-    # Missed entirely by the old arbitrary LIMIT 200 subset.
-    names = _names(shipped, "rotate element around axis", 3)
-    assert any(n.startswith("ElementTransformUtils") for n in names), names
+    # Missed entirely by the old arbitrary LIMIT 200 subset. BM25 puts
+    # Location.Rotate first and ElementTransformUtils.RotateElement(s) within
+    # the default search_revit_api top_k of 10.
+    names = _names(shipped, "rotate element around axis", 10)
+    assert names[0] == "Location.Rotate Method", names
+    assert "ElementTransformUtils.RotateElement Method" in names, names
 
 
 def test_api_name_queries(shipped):
@@ -73,3 +54,29 @@ def test_api_name_queries(shipped):
 def test_keyword_search_is_deterministic(shipped):
     first = _names(shipped, "create floor from boundary", 10)
     assert first == _names(shipped, "create floor from boundary", 10)
+
+
+def test_misspelt_identifier_still_gets_candidates(shipped):
+    """An unknown or misspelt identifier matches on its camel-case parts, so
+    search_revit_api lists candidates (for a reranker to judge) instead of
+    "No API entries found"."""
+    text = server.search_api(shipped, "FiltredElementColector", 10)
+    assert text.startswith("Rerank: none" + chr(10) * 2 + "### "), text[:200]
+
+
+def test_wall_create_stays_first_through_the_tool(shipped):
+    text = server.search_api(shipped, "Wall.Create", 10)
+    assert text.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10)), text[:200]
+
+
+def test_keyword_index_sits_next_to_the_shipped_db(shipped, shipped_dbs):
+    from revit_api_docs import bm25
+
+    api_db, _ = shipped_dbs
+    _names(shipped, "Wall.Create", 1)
+    index = api_db.with_name(bm25.INDEX_FILENAME)
+    assert index.is_file()
+    meta = bm25.Bm25Index.read_meta(index)
+    assert meta is not None and meta["format_version"] == str(bm25.FORMAT_VERSION)
+    assert meta["source_sha256"] == bm25.source_sha256(api_db)
+    assert int(meta["rows"]) > 0
