@@ -213,6 +213,55 @@ def test_jev_rejects_malformed_answers(jev_key, answer):
         jev(t).rerank("q", ["a"], strict=True)
 
 
+class _CountingClient(httpx.Client):
+    """httpx.Client that records each construction and close (the real transport is injected)."""
+
+    created: list["_CountingClient"] = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _CountingClient.created.append(self)
+        self.closed_by_us = False
+
+    def close(self):
+        self.closed_by_us = True
+        super().close()
+
+
+@pytest.fixture
+def counting_client(monkeypatch):
+    _CountingClient.created = []
+    monkeypatch.setattr(httpx, "Client", _CountingClient)
+    return _CountingClient.created
+
+
+def test_jev_reuses_one_client_across_calls(jev_key, counting_client):
+    calls: list = []
+    r = jev(jev_transport(lambda d: 0.5, calls))
+    assert counting_client == []  # created lazily, not in __init__
+    r.score("q", ["a", "b"])
+    r.score("q", ["c"])
+    r.rerank("q", [f"d{i}" for i in range(61)], top_n=3)  # 3 batches from worker threads
+    assert len(counting_client) == 1
+    assert len(calls) == 5  # the injected transport still serves every request
+    r.close()
+    assert counting_client[0].closed_by_us and counting_client[0].is_closed
+    r.score("q", ["a"])  # a call after close() opens a new client
+    assert len(counting_client) == 2 and not counting_client[1].is_closed
+    r.close()
+    r.close()  # idempotent
+
+
+def test_cohere_reuses_one_client_across_calls(cohere_key, counting_client):
+    calls: list = []
+    r = Reranker(transport=cohere_transport([0.1, 0.8, 0.3], calls))
+    r.rerank("q", ["a", "b", "c"], top_n=2)
+    r.rerank("q", ["a", "b"], top_n=2)
+    assert len(counting_client) == 1 and len(calls) == 2
+    r.close()
+    assert counting_client[0].is_closed
+
+
 def test_jev_without_key_never_calls_out():
     calls: list = []
     r = jev(jev_transport(lambda d: 0.5, calls))
@@ -385,10 +434,13 @@ def test_abstains_when_every_candidate_is_below_the_threshold(tiny_dbs, tmp_path
     assert len(res.api_items) == 3  # low-scoring candidates stay for reference
 
     lines = server.search_api(r, "wall", 3).splitlines()
+    # Neutral: a low best score may be a missing member or a recall miss.
     assert lines[0] == (
-        "No API entry in the Revit 2026 data set matched this query (best relevance 0.07 < 0.20). "
-        "The class or member may not exist in this version; check the name and the Revit version "
-        "before writing code.")
+        "No entry in the Revit 2026 data set scored high enough for this query (best relevance "
+        "0.07 < 0.20). This can mean the member is absent from this version, or that the data set "
+        "has it under a different name or wording; check the name and version, or rephrase.")
+    assert "absent from this version" in lines[0] and "different name or wording" in lines[0]
+    assert "may not exist" not in lines[0]
     assert lines[1].startswith("Rerank: jev.") and "for reference only" in lines[1]
     assert lines.count("Relevance: 0.07") == 3
     assert r.format_results(res).splitlines()[1] == "abstained: best relevance 0.07 < 0.20"

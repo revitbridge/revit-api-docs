@@ -17,7 +17,9 @@ Providers (config `rerank.provider`, env REVIT_API_DOCS_RERANK_PROVIDER):
     none    no reranking.
 
 Every provider has the same call: `rerank(query, documents, top_n, strict=False)
--> list[RerankResult]`. With strict=False a failure returns the input order
+-> list[RerankResult]`. Each instance keeps one HTTP client (created on the
+first call, reused afterwards so the TLS setup is paid once); `close()`
+releases it. With strict=False a failure returns the input order
 (the historical Cohere behaviour); with strict=True it raises RerankError so
 the caller can try the next provider. `create_rerank_chain` returns the
 providers to try in order: [jev, cohere] for provider "jev" (Cohere only when
@@ -92,6 +94,9 @@ class RerankProvider:
     ) -> list[RerankResult]:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release network resources; a later call opens them again."""
+
     @staticmethod
     def _fallback(documents: list[str], top_n: int) -> list[RerankResult]:
         """Return documents in original (vector similarity) order."""
@@ -99,6 +104,45 @@ class RerankProvider:
             RerankResult(index=i, score=1.0 - i * 0.01, text=doc)
             for i, doc in enumerate(documents[:top_n])
         ]
+
+
+class _SharedClient:
+    """One httpx.Client per provider instance, created on first use.
+
+    Building a client loads the TLS trust store (close to a second on some
+    machines), so it is built once and reused; httpx.Client may serve
+    requests from several threads at once.
+    """
+
+    def __init__(self, **kwargs: Any):
+        self._kwargs = kwargs
+        self._client: httpx.Client | None = None
+        self._lock = threading.Lock()
+
+    def get(self) -> httpx.Client:
+        client = self._client
+        if client is None:
+            with self._lock:
+                if self._client is None:
+                    self._client = httpx.Client(**self._kwargs)
+                client = self._client
+        return client
+
+    def close(self) -> None:
+        with self._lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
+
+
+def _client_kwargs(timeout: float, proxy: str | None,
+                   transport: httpx.BaseTransport | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"timeout": timeout}
+    if proxy:
+        kwargs["proxy"] = proxy
+    if transport is not None:
+        kwargs["transport"] = transport
+    return kwargs
 
 
 # -- Cohere -----------------------------------------------------------------
@@ -121,6 +165,7 @@ class Reranker(RerankProvider):
         self._api_key = os.getenv(api_key_env, "")
         self._proxy = proxy
         self._transport = transport
+        self._http = _SharedClient(**_client_kwargs(10.0, proxy, transport))
 
         if self._api_key:
             _log.info(f"[Reranker] initialized model={self._model}")
@@ -171,17 +216,9 @@ class Reranker(RerankProvider):
                 "return_documents": False,
             }
 
-            client_kwargs: dict[str, Any] = {"timeout": 10.0}
-            if self._proxy:
-                client_kwargs["proxy"] = self._proxy
-            if self._transport is not None:
-                client_kwargs["transport"] = self._transport
-
-            with httpx.Client(**client_kwargs) as client:
-                resp = client.post(_COHERE_RERANK_URL, headers=headers,
-                                   json=payload)
-                resp.raise_for_status()
-                data = resp.json()
+            resp = self._http.get().post(_COHERE_RERANK_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
             results = []
             for item in data.get("results", []):
@@ -201,6 +238,9 @@ class Reranker(RerankProvider):
                   f"in {elapsed:.2f}s "
                   f"scores=[{', '.join(f'{r.score:.3f}' for r in results[:3])}...]")
         return results
+
+    def close(self) -> None:
+        self._http.close()
 
 
 CohereReranker = Reranker
@@ -273,6 +313,7 @@ class JevReranker(RerankProvider):
         self._proxy = proxy
         self._transport = transport
         self._sleep = sleep
+        self._http = _SharedClient(**_client_kwargs(self._timeout, proxy, transport))
 
         if self._api_key:
             _log.info(f"[JevReranker] initialized model={self._model}")
@@ -319,20 +360,19 @@ class JevReranker(RerankProvider):
         q = self.query_text(query)
         bs = self._batch_size
         batches = [documents[i:i + bs] for i in range(0, len(documents), bs)]
-        client_kwargs: dict[str, Any] = {"timeout": self._timeout}
-        if self._proxy:
-            client_kwargs["proxy"] = self._proxy
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
-        with httpx.Client(**client_kwargs) as client:
-            if len(batches) == 1:
-                per_batch = [self._score_batch(client, q, batches[0])]
-            else:
-                workers = min(self._max_concurrency, len(batches))
-                with ThreadPoolExecutor(max_workers=workers,
-                                        thread_name_prefix="revit-api-docs-jev") as pool:
-                    per_batch = list(pool.map(lambda b: self._score_batch(client, q, b), batches))
+        client = self._http.get()
+        if len(batches) == 1:
+            per_batch = [self._score_batch(client, q, batches[0])]
+        else:
+            workers = min(self._max_concurrency, len(batches))
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="revit-api-docs-jev") as pool:
+                per_batch = list(pool.map(lambda b: self._score_batch(client, q, b), batches))
         return [s for batch in per_batch for s in batch]
+
+    def close(self) -> None:
+        """Close the HTTP client; the next score() opens a new one."""
+        self._http.close()
 
     def _score_batch(self, client: httpx.Client, query: str, docs: list[str]) -> list[float]:
         ids = [f"d{i}" for i in range(len(docs))]
