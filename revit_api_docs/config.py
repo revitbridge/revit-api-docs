@@ -8,7 +8,8 @@ The dict keeps the shape the retriever and the pipeline tools expect
 `sdk`); API keys are looked up by the environment variable named in
 `api_key_env`, never stored in the dict.
 
-Rerank overrides: REVIT_API_DOCS_RERANK_PROVIDER (cohere | jev | none),
+Rerank overrides: REVIT_API_DOCS_RERANK_PROVIDER (auto | jev | cohere | none; auto,
+the default, picks jev or cohere by which key is set),
 REVIT_API_DOCS_JEV_MODEL (default jev-latest) and REVIT_API_DOCS_MIN_RELEVANCE
 (a probability 0-1, or "none"; honoured only while Jev answers).
 """
