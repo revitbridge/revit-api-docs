@@ -245,8 +245,8 @@ def test_a_failed_build_leaves_no_temporary_file(tiny_dbs, tmp_path, no_embeddin
 
 # -- candidate pool ------------------------------------------------------------------
 
-def test_keyword_pool_is_top_k_without_vectors_and_unchanged_with_them(tiny_dbs, tmp_path, no_embedding_key,
-                                                                       monkeypatch):
+def test_keyword_pool_is_top_k_with_and_without_vectors(tiny_dbs, tmp_path, no_embedding_key,
+                                                        monkeypatch, fake_vectors):
     api_db, sdk_db = tiny_dbs
     r = _retriever(api_db, sdk_db, tmp_path)
     limits: list[int] = []
@@ -267,17 +267,19 @@ def test_keyword_pool_is_top_k_without_vectors_and_unchanged_with_them(tiny_dbs,
     r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=False)
     assert limits[-1] == 3
 
-    # Next to vector results the keyword search adds final_api_n entries, as before.
+    # Next to vector results the keyword search goes to the same depth as the
+    # vector search (top_k), and the fused pool is cut to top_k as well.
     class _ZeroEmbedder:
         def embed_query(self, query):
             return [0.0]
 
-    class _Collection:
-        def query(self, query_embeddings, n_results):
-            return {"ids": [["1"]], "distances": [[0.5]]}
-
+    collection, records = fake_vectors
+    api = collection(records("api"), hits=["5"])
     r._embedder = _ZeroEmbedder()
-    r._api_collection = r._code_collection = _Collection()
+    r._api_collection, r._code_collection = api, collection(records("sdk"))
     monkeypatch.setattr(r, "_open_collections", lambda: None)
-    r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
-    assert limits[-1] == 3
+    res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert limits[-1] == r._api_top_k and api.queries[-1]["n_results"] == r._api_top_k
+    assert len(res.api_items) == 3
+    r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=False)
+    assert limits[-1] == 3 and api.queries[-1]["n_results"] == 3

@@ -1,25 +1,55 @@
 """
-Two-tier retriever — ChromaDB (semantic index) + SQLite (content store).
+Two-tier retriever: ChromaDB (semantic index) + SQLite (content store).
 
 Architecture:
-    ChromaDB holds lightweight embeddings (summary-based) + document IDs.
-    SQLite holds the full content (code, API docs, parameters, etc.).
+    ChromaDB holds lightweight embeddings (summary-based); each record's
+    metadata names its entry (`name` for the API reference, `project` for the
+    SDK samples). SQLite holds the full content (code, API docs, parameters).
     At query time:
-        0. (Optional) LLM query rewriting: extract Revit API keywords from user query
-        1. Embed the rewritten query and search ChromaDB → ranked IDs + scores
-        2. Batch-fetch full records from SQLite by ID
-        3. Assemble structured context dicts ready for prompt injection
+        0. (Optional) LLM query rewriting: extract Revit API keywords from the query
+        1. Embed the (rewritten) query and search ChromaDB -> ranked records
+        2. Match each record to its SQLite row by entry name, fetch the rows
+        3. BM25 keyword search on SQLite, fused with the vector ranking by
+           reciprocal rank (RRF)
+        4. (Optional) rerank the fused candidates; assemble the context
 
 Public API:
     retriever = RAGRetriever(config, api_db, sdk_db, chromadb_api_dir, chromadb_code_dir)
     results   = retriever.search(query, api_top_k=15, code_top_k=5)
     context   = retriever.build_context(results)
 
+Vector records and SQLite rows: a record id need not be the id of the row the
+record was built from. In the v1.0-data release it is not: its 28,863 API
+records are numbered independently of the 27,596 rows of revit_api. A vector
+hit is therefore matched to the row whose entry name equals the record's
+metadata: the row with the record's own id when that row carries the name,
+otherwise the row of that name; among rows sharing a name, the one whose
+full_id or info equals the record's, else the lowest id. Records whose name is
+not in SQLite are dropped. The name map is built on the first vector query and
+kept in memory for the process (never written to disk).
+
+Consistency probe: on the first vector query, 50 records of each collection
+are sampled and compared with SQLite. When fewer than 90% of the sampled ids
+name the same entry as the row with that id, the warning
+`vector_store_misaligned` is logged and hits are matched by name as above (the
+shipped data set is in this state). When fewer than 50% of the sampled names
+are found in SQLite at all, the same warning says that vector search is off,
+and it stays off for the process (vector_search_enabled becomes False; keyword
+search only). The result is cached for the process; check_vector_stores()
+runs the probe without an embedding key (`revit-api-docs download` prints it).
+
+Hybrid ranking: the vector hits and the BM25 hits, each to the depth
+retrieval.api.top_k, are fused by reciprocal rank, score = sum of
+1 / (RRF_K + rank) with RRF_K = 60. The best top_k fused entries go to the
+reranker; without one they are cut to the requested count. Without vector
+search the BM25 order is kept as it is.
+
 Degraded modes (no network keys needed for the MCP server to be useful):
     - No embedding API key  -> vector search is skipped, keyword search only
                                (BM25 over an SQLite FTS5 index, see bm25.py;
                                the LIKE scorer when FTS5 is missing).
-    - No rerank API key     -> results keep vector/keyword order.
+    - Vector store fails the consistency probe -> keyword search only.
+    - No rerank API key     -> results keep the fused (or keyword) order.
     - Jev call fails        -> Cohere reranks when its key is set, else no rerank;
                                SearchResults.rerank_used says which one ran.
     - No LLM key            -> query rewriting is skipped.
@@ -36,6 +66,7 @@ never abstain: their scores are not calibrated probabilities.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -52,12 +83,259 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+_log = logging.getLogger("revit_api_docs.retriever")
+
+# Reciprocal rank fusion: score = sum over the rankings of 1 / (RRF_K + rank), rank from 1.
+RRF_K = 60
+
+# Consistency probe of the vector collections (see the module docstring).
+PROBE_SAMPLE = 50     # records sampled per collection
+PROBE_BLOCKS = 10     # read as 10 runs of consecutive records spread over the collection
+PROBE_ALIGNED = 0.9   # below this share of sampled ids naming their row's entry: misaligned
+PROBE_USABLE = 0.5    # below this share of sampled names found in SQLite: unusable
+
+
+@dataclass
+class VectorProbe:
+    """Consistency probe result for one ChromaDB collection.
+
+    status: "aligned" (record ids are row ids), "misaligned" (they are not,
+    but the entry names are found: hits are matched to rows by name) or
+    "unusable" (the names are not found either: vector search is off).
+    """
+    collection: str     # ChromaDB collection, e.g. "revit_api"
+    table: str          # SQLite table its records describe
+    key: str            # metadata field / column holding the entry name
+    records: int        # records in the collection
+    sampled: int
+    id_matches: int     # sampled records whose id is a row carrying the same name
+    name_matches: int   # sampled records whose name is found in the table
+    status: str
+
+    def describe(self) -> str:
+        head = f"{self.collection} vectors ({self.records} records) vs SQLite {self.table}"
+        if not self.sampled:
+            return f"{head}: unusable, the collection is empty; vector search is off"
+        ids = (f"{self.id_matches}/{self.sampled} sampled record ids name the same entry "
+               "as the row with that id")
+        names = f"{self.name_matches}/{self.sampled} sampled entry names ({self.key}) found"
+        if self.status == "aligned":
+            return f"{head}: aligned, {ids}"
+        if self.status == "misaligned":
+            return f"{head}: misaligned, {ids}; {names}, so vector hits are matched to rows by name"
+        return f"{head}: unusable, {ids} and {names}; vector search is off"
+
+
+@dataclass(frozen=True)
+class _Source:
+    """A vector collection and the SQLite table its records describe."""
+    collection: str
+    db_path: str
+    table: str
+    key: str                        # metadata field and column holding the entry name
+    details: tuple[str, ...] = ()   # fields that tell rows sharing a name apart
+
+
+def _api_source(api_db_path: str) -> _Source:
+    return _Source("revit_api", api_db_path, "revit_api", "name", ("full_id", "info"))
+
+
+def _sdk_source(sdk_db_path: str, new_schema: bool) -> _Source:
+    return _Source("revit_sdk", sdk_db_path, "sdk_info" if new_schema else "revit_sdk", "project")
+
+
+def _sdk_schema_is_new(sdk_db_path: str) -> bool:
+    """True when the SDK database has the sdk_info table, False for the legacy revit_sdk."""
+    if not os.path.exists(sdk_db_path):
+        raise FileNotFoundError(f"SDK DB not found: {sdk_db_path}")
+    conn = sqlite3.connect(sdk_db_path)
+    try:
+        conn.execute("SELECT id FROM sdk_info LIMIT 1")
+        return True
+    except sqlite3.OperationalError:
+        # table missing / schema mismatch -> legacy schema
+        return False
+    finally:
+        conn.close()
+
+
+def _row_id(record_id: Any) -> int | None:
+    try:
+        return int(record_id)
+    except (TypeError, ValueError):
+        return None
+
+
+class _RowIndex:
+    """Entry name -> row ids of one SQLite table, to match vector records to rows."""
+
+    def __init__(self, src: _Source):
+        self.src = src
+        self.name_by_id: dict[int, str] = {}
+        self.ids_by_name: dict[str, list[int]] = {}
+        self.details: dict[int, dict[str, str]] = {}   # only rows that share their name
+        self._tie_logged = False
+        conn = sqlite3.connect(src.db_path)
+        try:
+            for rid, name in conn.execute(f"SELECT id, {src.key} FROM {src.table} ORDER BY id"):
+                name = name or ""
+                self.name_by_id[rid] = name
+                if name:
+                    self.ids_by_name.setdefault(name, []).append(rid)
+            shared = [rid for ids in self.ids_by_name.values() if len(ids) > 1 for rid in ids]
+            if src.details and shared:
+                cols = ", ".join(src.details)
+                for i in range(0, len(shared), 500):
+                    chunk = shared[i:i + 500]
+                    rows = conn.execute(f"SELECT id, {cols} FROM {src.table} "
+                                        f"WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+                    for row in rows:
+                        self.details[row[0]] = {c: v or "" for c, v in zip(src.details, row[1:])}
+        finally:
+            conn.close()
+
+    def id_agrees(self, record_id: Any, meta: dict | None) -> bool:
+        """True when the row with the record's id carries the record's entry name."""
+        name = (meta or {}).get(self.src.key)
+        rid = _row_id(record_id)
+        return isinstance(name, str) and bool(name) and self.name_by_id.get(rid) == name
+
+    def resolve(self, record_id: Any, meta: dict | None, trust_ids: bool = False) -> int | None:
+        """Row id for one vector record, or None when no row has its entry name.
+
+        A record without a name in its metadata keeps its id only with
+        `trust_ids` (the probe found the ids aligned); otherwise it is dropped.
+        """
+        meta = meta or {}
+        name = meta.get(self.src.key)
+        rid = _row_id(record_id)
+        if not isinstance(name, str) or not name:
+            return rid if trust_ids and rid in self.name_by_id else None
+        if rid is not None and self.name_by_id.get(rid) == name:
+            return rid
+        ids = self.ids_by_name.get(name)
+        if not ids:
+            return None
+        if len(ids) == 1:
+            return ids[0]
+        for col in self.src.details:
+            want = meta.get(col)
+            if isinstance(want, str) and want:
+                same = [i for i in ids if self.details.get(i, {}).get(col) == want]
+                if same:
+                    return same[0]
+        if not self._tie_logged:
+            self._tie_logged = True
+            _log.debug("vector record %s: %s %r names %d rows of %s and its metadata does not "
+                       "tell them apart; using the lowest id %d (later cases are not logged)",
+                       record_id, self.src.key, name, len(ids), self.src.table, ids[0])
+        return ids[0]
+
+
+# Built on the first vector query and kept for the process, never written to
+# disk: the name map of each table and the probe result of each collection.
+_ROW_INDEXES: dict[tuple, _RowIndex] = {}
+_PROBES: dict[tuple, VectorProbe] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _db_key(path: str) -> tuple:
+    """A database file as a cache key: path, size and mtime (a replaced file is a new key)."""
+    try:
+        st = os.stat(path)
+        return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return (os.path.realpath(path), None, None)
+
+
+def _row_index(src: _Source) -> _RowIndex:
+    key = (src, _db_key(src.db_path))
+    with _CACHE_LOCK:
+        index = _ROW_INDEXES.get(key)
+        if index is None:
+            index = _ROW_INDEXES[key] = _RowIndex(src)
+    return index
+
+
+def probe_vector_collection(collection: Any, index: _RowIndex) -> VectorProbe:
+    """Sample up to PROBE_SAMPLE records of `collection` and compare their names with SQLite.
+
+    The sample is PROBE_BLOCKS runs of consecutive records at evenly spaced
+    offsets: deterministic, and 10 reads instead of 50 (an offset read costs
+    about 25 ms on the shipped store).
+    """
+    total = int(collection.count())
+    want = min(PROBE_SAMPLE, total)
+    sample: dict[str, dict | None] = {}
+    if want > 0:
+        blocks = min(PROBE_BLOCKS, want)
+        per = -(-want // blocks)
+        for b in range(blocks):
+            got = collection.get(limit=per, offset=b * total // blocks, include=["metadatas"])
+            ids = got.get("ids") or []
+            metas = got.get("metadatas") or []
+            for i, cid in enumerate(ids):
+                if len(sample) < want:
+                    sample.setdefault(str(cid), metas[i] if i < len(metas) else None)
+    n = len(sample)
+    id_hits = sum(1 for cid, meta in sample.items() if index.id_agrees(cid, meta))
+    name_hits = sum(1 for cid, meta in sample.items() if index.resolve(cid, meta) is not None)
+    if n and id_hits >= PROBE_ALIGNED * n:
+        status = "aligned"
+    elif n and name_hits >= PROBE_USABLE * n:
+        status = "misaligned"
+    else:
+        status = "unusable"
+    src = index.src
+    return VectorProbe(src.collection, src.table, src.key, total, n, id_hits, name_hits, status)
+
+
+def _probe(src: _Source, collection: Any, chroma_dir: str) -> VectorProbe:
+    """probe_vector_collection, once per collection and database in a process."""
+    key = (src, _db_key(src.db_path), os.path.realpath(chroma_dir))
+    with _CACHE_LOCK:
+        probe = _PROBES.get(key)
+    if probe is None:
+        probe = probe_vector_collection(collection, _row_index(src))
+        with _CACHE_LOCK:
+            probe = _PROBES.setdefault(key, probe)
+    return probe
+
+
+def _open_collection(path: str, name: str) -> Any:
+    """Open one ChromaDB collection.
+
+    Each client gets its own Settings object: chromadb writes the client's
+    path into the object it is given, so one object shared by two clients
+    made a later client for the first path (a second retriever in the same
+    process) fail with "An instance of Chroma already exists ... with
+    different settings".
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    client = chromadb.PersistentClient(path=path, settings=Settings(anonymized_telemetry=False))
+    return client.get_collection(name)
+
+
+def check_vector_stores(api_db_path: str, sdk_db_path: str, chromadb_api_dir: str,
+                        chromadb_code_dir: str) -> list[VectorProbe]:
+    """Open both collections and run the consistency probe on each.
+
+    Needs no embedding key; results are cached for the process. Used by
+    `revit-api-docs download` to report the state of an installed data set.
+    """
+    sources = [(_api_source(api_db_path), chromadb_api_dir),
+               (_sdk_source(sdk_db_path, _sdk_schema_is_new(sdk_db_path)), chromadb_code_dir)]
+    return [_probe(src, _open_collection(d, src.collection), d) for src, d in sources]
+
+
 @dataclass
 class RetrievedItem:
     """A single retrieved item with full content from SQLite."""
     source: str               # "api" or "sdk"
-    chromadb_id: str
-    distance: float
+    chromadb_id: str          # the SQLite row id (str); the field name is historical
+    distance: float           # lower is better; orders candidates, not a calibrated score
     # API fields
     name: str = ""
     full_id: str = ""
@@ -111,8 +389,7 @@ class RAGRetriever:
         chromadb_api_dir: str,
         chromadb_code_dir: str,
     ):
-        import logging
-        self._log = logging.getLogger("revit_api_docs.retriever")
+        self._log = _log
 
         from .embedder.providers import create_embedding
         try:
@@ -162,10 +439,11 @@ class RAGRetriever:
             self._log.warning("SQLite FTS5 is not available in this Python build; keyword "
                               "search uses the slower LIKE scorer")
 
-        # Consistency check: record_count in the ChromaDB meta.json should equal
-        # the SQLite revit_api row count; otherwise the two stores are out of sync.
-        # Logged at INFO: the shipped v1.0-data has this property (28863 vectors,
-        # 27596 rows) and the extra vectors are dropped at query time.
+        # Size check: record_count in the ChromaDB meta.json against the SQLite
+        # revit_api row count. Logged at INFO: the shipped v1.0-data differs
+        # (28863 vectors, 27596 rows). Vector hits are matched to rows by entry
+        # name, so the counts need not agree; the consistency probe on the
+        # first vector query checks what matters (see the module docstring).
         try:
             meta_path = os.path.join(chromadb_api_dir, "meta.json")
             if os.path.exists(meta_path):
@@ -177,8 +455,8 @@ class RAGRetriever:
                 if meta_count is not None and meta_count != sqlite_count:
                     self._log.info(
                         "index/content mismatch: ChromaDB meta.record_count=%s but SQLite "
-                        "revit_api has %s rows; vectors without a row are dropped at query time "
-                        "(rebuild the ChromaDB index after parse_chm rebuilds SQLite)",
+                        "revit_api has %s rows; vector hits are matched to rows by entry name "
+                        "and records without a row are dropped",
                         meta_count, sqlite_count,
                     )
         except Exception as e:
@@ -186,6 +464,16 @@ class RAGRetriever:
 
         # Detect SDK schema
         self._sdk_new_schema = self._detect_sdk_schema()
+
+        # Vector records are matched to SQLite rows by entry name, checked by
+        # the consistency probe on the first vector query (module docstring).
+        self._sources = {
+            "api": _api_source(api_db_path),
+            "sdk": _sdk_source(sdk_db_path, self._sdk_new_schema),
+        }
+        self._probes: dict[str, VectorProbe] | None = None
+        self._vector_off: str | None = None   # why the probe switched vector search off
+        self._probe_lock = threading.Lock()
 
         # Vector search is switched off for the process after this many
         # consecutive embedding/index failures (expired key, unreachable API).
@@ -213,23 +501,55 @@ class RAGRetriever:
         with self._collections_lock:
             if self._code_collection is not None:
                 return
-            import chromadb
-            from chromadb.config import Settings
-
-            settings = Settings(anonymized_telemetry=False)
-            api = (
-                chromadb.PersistentClient(path=self._chromadb_api_dir, settings=settings)
-                .get_collection("revit_api")
-            )
-            code = (
-                chromadb.PersistentClient(path=self._chromadb_code_dir, settings=settings)
-                .get_collection("revit_sdk")
-            )
+            api = _open_collection(self._chromadb_api_dir, "revit_api")
+            code = _open_collection(self._chromadb_code_dir, "revit_sdk")
             self._api_collection, self._code_collection = api, code
+
+    def _check_vector_stores(self) -> None:
+        """Consistency probe of both collections; call after _open_collections().
+
+        Each collection is probed once per process (cached). Logs the warning
+        `vector_store_misaligned` when record ids are not row ids, and switches
+        vector search off for the process when a collection's entry names are
+        not found in SQLite either, or when the probe itself fails.
+        """
+        if self._probes is not None:
+            return
+        with self._probe_lock:
+            if self._probes is not None:
+                return
+            probes: dict[str, VectorProbe] = {}
+            try:
+                for source, coll, chroma_dir in (
+                        ("api", self._api_collection, self._chromadb_api_dir),
+                        ("sdk", self._code_collection, self._chromadb_code_dir)):
+                    probes[source] = _probe(self._sources[source], coll, chroma_dir)
+            except Exception as e:
+                self._vector_off = f"consistency probe failed ({type(e).__name__}: {str(e)[:200]})"
+                self._log.warning(f"vector_store_misaligned: {self._vector_off}; vector search "
+                                  "is off for this process, keyword search only")
+            else:
+                for p in probes.values():
+                    if p.status == "aligned":
+                        self._log.info(f"vector store check: {p.describe()}")
+                    else:
+                        self._log.warning(f"vector_store_misaligned: {p.describe()}")
+                unusable = [p.describe() for p in probes.values() if p.status == "unusable"]
+                if unusable:
+                    self._vector_off = "; ".join(unusable)
+            self._probes = probes
 
     @property
     def vector_search_enabled(self) -> bool:
-        return self._embedder is not None
+        """True while queries go to the vector store: an embedding provider is
+        configured and the consistency probe (run on the first vector query)
+        has not switched vector search off."""
+        return self._embedder is not None and self._vector_off is None
+
+    @property
+    def vector_probes(self) -> list[VectorProbe]:
+        """Consistency probe results, once the first vector query has run the probe."""
+        return list((self._probes or {}).values())
 
     @property
     def revit_version(self) -> str:
@@ -259,17 +579,7 @@ class RAGRetriever:
 
     def _detect_sdk_schema(self) -> bool:
         """Check if sdk_db uses the new sdk_info table."""
-        if not os.path.exists(self._sdk_db):
-            raise FileNotFoundError(f"SDK DB not found: {self._sdk_db}")
-        conn = sqlite3.connect(self._sdk_db)
-        try:
-            conn.execute("SELECT id FROM sdk_info LIMIT 1")
-            return True
-        except sqlite3.OperationalError:
-            # table missing / schema mismatch -> legacy schema
-            return False
-        finally:
-            conn.close()
+        return _sdk_schema_is_new(self._sdk_db)
 
     def _get_rerank_chain(self) -> list:
         """Lazy-init the rerank providers from config (empty list: no rerank)."""
@@ -348,9 +658,10 @@ class RAGRetriever:
     ) -> SearchResults:
         """
         Tier 0: (Optional) LLM query rewriting for better keyword alignment.
-        Tier 1: Embed query → search both ChromaDB collections (broad recall).
-        Tier 2: Fetch full records from SQLite by matched IDs.
-        Tier 3: (Optional) Rerank results for precision using cross-encoder.
+        Tier 1: Embed query -> search both ChromaDB collections (broad recall).
+        Tier 2: Match the records to SQLite rows by entry name, fetch the rows.
+        Tier 2.5: BM25 keyword search, fused with the vector hits by RRF.
+        Tier 3: (Optional) Rerank the fused candidates for precision.
 
         `rerank=None` follows `rewrite` (the historical fast/full switch); pass
         `rerank=True` with `rewrite=False` to rerank without an LLM rewrite.
@@ -374,31 +685,37 @@ class RAGRetriever:
         search_query = self.rewrite_query(query) if rewrite else query
         t_rewrite = _time.monotonic() - t0
 
-        # Tier 1: Embedding + Vector search (skipped without an embedding key;
-        # a failing embedding API degrades to keyword search instead of erroring)
+        # Tier 1: Embedding + Vector search (skipped without an embedding key or
+        # when the consistency probe switched it off; a failing embedding API
+        # degrades to keyword search instead of erroring)
         api_items: list[RetrievedItem] = []
+        vec_items: list[RetrievedItem] = []
         sdk_items: list[RetrievedItem] = []
         t_embed = 0.0
         vector_ok = False
-        if self._embedder is not None:
+        if self.vector_search_enabled:
             try:
                 self._open_collections()
-                query_embedding = self._embedder.embed_query(search_query)
-                t_embed = _time.monotonic() - t0 - t_rewrite
+                self._check_vector_stores()   # first vector query only; may switch vectors off
+                if self._vector_off is None:
+                    query_embedding = self._embedder.embed_query(search_query)
+                    t_embed = _time.monotonic() - t0 - t_rewrite
 
-                if retrieve_api_k > 0:
-                    api_raw = self._api_collection.query(
-                        query_embeddings=[query_embedding],
-                        n_results=retrieve_api_k,
-                    )
-                    api_items = self._hydrate_api(api_raw)
-                if retrieve_code_k > 0:
-                    code_raw = self._code_collection.query(
-                        query_embeddings=[query_embedding],
-                        n_results=retrieve_code_k,
-                    )
-                    sdk_items = self._hydrate_sdk(code_raw)
-                vector_ok = True
+                    if retrieve_api_k > 0:
+                        api_raw = self._api_collection.query(
+                            query_embeddings=[query_embedding],
+                            n_results=retrieve_api_k,
+                            include=["metadatas", "distances"],
+                        )
+                        vec_items = self._hydrate_api(api_raw)
+                    if retrieve_code_k > 0:
+                        code_raw = self._code_collection.query(
+                            query_embeddings=[query_embedding],
+                            n_results=retrieve_code_k,
+                            include=["metadatas", "distances"],
+                        )
+                        sdk_items = self._hydrate_sdk(code_raw)
+                    vector_ok = True
                 self._embed_failures = 0
             except Exception as e:
                 self._embed_failures += 1
@@ -408,38 +725,27 @@ class RAGRetriever:
                     self._log.warning("vector search disabled for this process after "
                                       f"{self._embed_failures} consecutive failures")
                     self._embedder = None
-                api_items, sdk_items = [], []
+                vec_items, sdk_items = [], []
         if not vector_ok and final_code_n > 0:
             sdk_items = self._keyword_search_sdk(query, limit=final_code_n)
 
         # Tier 2: Hydrate from SQLite (done above per source)
         t_hydrate = _time.monotonic() - t0 - t_rewrite - t_embed
 
-        # Tier 2.5: Keyword search on SQLite - merge with vector results
-        # This catches exact name/API matches that embedding search misses.
-        # Without vector results the keyword search is the only source, so it
-        # supplies the full candidate pool for the reranker (top_k); next to
-        # vector results it adds final_api_n entries, as before.
-        lexical_k = final_api_n if vector_ok else retrieve_api_k
-        kw_items = self._keyword_search_api(query, limit=lexical_k) if lexical_k > 0 else []
-        if kw_items:
-            existing_ids = {item.chromadb_id for item in api_items}
-            merged_count = 0
-            for kw_item in kw_items:
-                if kw_item.chromadb_id not in existing_ids:
-                    api_items.append(kw_item)
-                    existing_ids.add(kw_item.chromadb_id)
-                    merged_count += 1
-                else:
-                    # Keyword match is also in vector results — boost its ranking
-                    for ai in api_items:
-                        if ai.chromadb_id == kw_item.chromadb_id:
-                            ai.distance = min(ai.distance, kw_item.distance)
-                            break
-            if merged_count:
-                self._log.info(f"[search] merged {merged_count} keyword results")
-            # Re-sort by distance after merging
-            api_items.sort(key=lambda x: x.distance)
+        # Tier 2.5: BM25 keyword search on SQLite, to the same depth as the
+        # vector search (top_k when reranking, else the requested count). With
+        # vector hits the two rankings are fused by reciprocal rank and the
+        # best retrieve_api_k entries are the candidates; without them the
+        # keyword order is used as it is. No bonus is added after fusion: an
+        # entry in both rankings already scores higher.
+        kw_items = self._keyword_search_api(query, limit=retrieve_api_k) if retrieve_api_k > 0 else []
+        if vector_ok and retrieve_api_k > 0:
+            api_items = rrf_fuse([kw_items, vec_items])[:retrieve_api_k]
+            both = len({i.chromadb_id for i in kw_items} & {i.chromadb_id for i in vec_items})
+            self._log.info(f"[search] RRF k={RRF_K}: {len(vec_items)} vector + {len(kw_items)} "
+                           f"keyword ({both} in both) -> {len(api_items)} candidates")
+        else:
+            api_items = kw_items
 
         # Tier 3: Rerank (only in full mode); the first provider that answers wins
         t_rerank = 0.0
@@ -524,10 +830,32 @@ class RAGRetriever:
     # Hydrate from SQLite
     # ------------------------------------------------------------------
 
+    def _vector_rows(self, source: str, raw: dict) -> tuple[list[int], list[float]]:
+        """SQLite row ids and ChromaDB distances for the records of a query result.
+
+        Closest first. Each record is matched to a row by its entry name (see
+        the module docstring); records without a matching row are dropped, and
+        a row reached by two records is kept once.
+        """
+        ids = (raw.get("ids") or [[]])[0] or []
+        distances = (raw.get("distances") or [[]])[0] or []
+        metas = (raw.get("metadatas") or [[]])[0] or []
+        index = _row_index(self._sources[source])
+        probe = (self._probes or {}).get(source)
+        trust_ids = probe is not None and probe.status == "aligned"
+        rows: list[int] = []
+        dists: list[float] = []
+        for i, cid in enumerate(ids):
+            rid = index.resolve(cid, metas[i] if i < len(metas) else None, trust_ids)
+            if rid is None or rid in rows:
+                continue
+            rows.append(rid)
+            dists.append(float(distances[i]) if i < len(distances) else 0.0)
+        return rows, dists
+
     def _hydrate_api(self, raw: dict) -> list[RetrievedItem]:
-        """Fetch full API records from SQLite by ChromaDB IDs."""
-        ids = raw["ids"][0] if raw["ids"] else []
-        distances = raw["distances"][0] if raw["distances"] else []
+        """Fetch the full API rows for the records of a ChromaDB query result."""
+        ids, distances = self._vector_rows("api", raw)
         if not ids:
             return []
 
@@ -537,20 +865,20 @@ class RAGRetriever:
         rows = conn.execute(
             f"SELECT id, name, full_id, summary, info, syntax, parameters, remark "
             f"FROM revit_api WHERE id IN ({placeholders})",
-            [int(i) for i in ids],
+            ids,
         ).fetchall()
         conn.close()
 
-        row_map = {str(r["id"]): r for r in rows}
+        row_map = {r["id"]: r for r in rows}
 
         items = []
-        for cid, dist in zip(ids, distances):
-            r = row_map.get(cid)
+        for rid, dist in zip(ids, distances):
+            r = row_map.get(rid)
             if r is None:
                 continue
             items.append(RetrievedItem(
                 source="api",
-                chromadb_id=cid,
+                chromadb_id=str(rid),
                 distance=dist,
                 name=r["name"] or "",
                 full_id=r["full_id"] or "",
@@ -563,9 +891,8 @@ class RAGRetriever:
         return items
 
     def _hydrate_sdk(self, raw: dict) -> list[RetrievedItem]:
-        """Fetch full SDK records from SQLite by ChromaDB IDs."""
-        ids = raw["ids"][0] if raw["ids"] else []
-        distances = raw["distances"][0] if raw["distances"] else []
+        """Fetch the full SDK sample rows for the records of a ChromaDB query result."""
+        ids, distances = self._vector_rows("sdk", raw)
         if not ids:
             return []
 
@@ -573,30 +900,29 @@ class RAGRetriever:
         conn.row_factory = sqlite3.Row
 
         placeholders = ",".join("?" * len(ids))
-        int_ids = [int(i) for i in ids]
 
         if self._sdk_new_schema:
             rows = conn.execute(
                 f"SELECT id, project, summary, content, mentioned_apis "
                 f"FROM sdk_info WHERE id IN ({placeholders})",
-                int_ids,
+                ids,
             ).fetchall()
-            row_map = {str(r["id"]): r for r in rows}
         else:
             rows = conn.execute(
                 f"SELECT id, project, filename, code, clean_code, description "
                 f"FROM revit_sdk WHERE id IN ({placeholders})",
-                int_ids,
+                ids,
             ).fetchall()
-            row_map = {str(r["id"]): r for r in rows}
+        row_map = {r["id"]: r for r in rows}
 
         conn.close()
 
         items = []
-        for cid, dist in zip(ids, distances):
-            r = row_map.get(cid)
+        for rid, dist in zip(ids, distances):
+            r = row_map.get(rid)
             if r is None:
                 continue
+            cid = str(rid)
             if self._sdk_new_schema:
                 items.append(RetrievedItem(
                     source="sdk",
@@ -641,7 +967,7 @@ class RAGRetriever:
         "please", "help", "show", "find", "look", "looking", "search",
     })
 
-    # Verb → base form mapping for common Revit-relevant verbs
+    # Verb -> base form mapping for common Revit-relevant verbs
     _VERB_STEMS = {
         "creates": "create", "created": "create", "creating": "create",
         "deletes": "delete", "deleted": "delete", "deleting": "delete",
@@ -701,7 +1027,7 @@ class RAGRetriever:
             stemmed = cls._VERB_STEMS.get(token, token)
 
             # Skip stop words only when BOTH the original token and its stem are
-            # stop words (so verb forms like "gets"→"get" that are also action
+            # stop words (so verb forms like "gets"->"get" that are also action
             # stems can survive if the stem is meaningful elsewhere).
             if token in cls._STOP_WORDS and stemmed in cls._STOP_WORDS:
                 continue
@@ -713,7 +1039,7 @@ class RAGRetriever:
             if stemmed in cls._ENTITY_NOUNS:
                 weighted.append((stemmed, 2.0))
             elif token in cls._VERB_STEMS:
-                # It was a verb form → stemmed action verb
+                # It was a verb form -> stemmed action verb
                 weighted.append((stemmed, 1.0))
             else:
                 weighted.append((stemmed, 0.5))
@@ -901,7 +1227,7 @@ class RAGRetriever:
             # Strong bonus for ALL tokens matching in name
             name_matched = sum(1 for t in tokens if t in name_l)
             if name_matched == len(tokens):
-                score *= 2.0  # all tokens in name — very relevant
+                score *= 2.0  # all tokens in name - very relevant
 
             scored.append((score, dict(r)))
 
@@ -1078,6 +1404,40 @@ class RAGRetriever:
                 lines.append(f"    code:    {preview}...")
 
         return "\n".join(lines)
+
+
+def rrf_fuse(rankings: list[list[RetrievedItem]], k: int = RRF_K) -> list[RetrievedItem]:
+    """Reciprocal rank fusion of several rankings of RetrievedItem (best first).
+
+    score = sum over the rankings that hold the entry of 1 / (k + rank), rank
+    from 1; entries are keyed by chromadb_id (the SQLite row id). Ties go to
+    the entry with the better single rank, then to the earlier ranking (the
+    retriever passes [keyword, vector], so a keyword hit leads a vector hit of
+    the same rank). `distance` becomes 1 - score / (len(rankings) / (k + 1)):
+    0 for an entry ranked first everywhere, used for ordering only.
+    """
+    score: dict[str, float] = {}
+    best: dict[str, tuple[int, int]] = {}   # (best rank, index of that ranking)
+    item_of: dict[str, RetrievedItem] = {}
+    for li, ranking in enumerate(rankings):
+        seen: set[str] = set()
+        for item in ranking:
+            key = item.chromadb_id
+            if key in seen:
+                continue
+            seen.add(key)
+            rank = len(seen)
+            score[key] = score.get(key, 0.0) + 1.0 / (k + rank)
+            item_of.setdefault(key, item)
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, li)
+    top = len(rankings) / (k + 1) if rankings else 1.0
+    fused = []
+    for key in sorted(score, key=lambda c: (-score[c], best[c][0], best[c][1])):
+        item = item_of[key]
+        item.distance = 1.0 - score[key] / top
+        fused.append(item)
+    return fused
 
 
 def rerank_label(results: SearchResults) -> str:

@@ -1,4 +1,5 @@
-"""Shared fixtures: a tiny SQLite data set so retriever tests need no ChromaDB or network."""
+"""Shared fixtures: a tiny SQLite data set so retriever tests need no ChromaDB or network,
+and stand-in vector collections over it."""
 from __future__ import annotations
 
 import json
@@ -131,10 +132,69 @@ def tiny_data_dir(tiny_dbs, tmp_path: Path) -> Path:
     return root
 
 
+class FakeCollection:
+    """Stands in for a ChromaDB collection: records (id -> metadata) and a fixed
+    query answer (record ids, closest first; distances 0.9, 0.91, ...), so the
+    vector path runs without chromadb or an embedding API."""
+
+    def __init__(self, records: dict[str, dict | None], hits: list[str] | None = None):
+        self.records = dict(records)
+        self.hits = list(hits or [])
+        self.queries: list[dict] = []
+
+    def count(self) -> int:
+        return len(self.records)
+
+    def get(self, ids=None, limit=None, offset=None, include=("metadatas", "documents")):
+        keys = list(self.records)
+        if ids is not None:
+            keys = [k for k in ids if k in self.records]
+        else:
+            start = offset or 0
+            keys = keys[start:start + limit] if limit is not None else keys[start:]
+        out = {"ids": keys}
+        if "metadatas" in include:
+            out["metadatas"] = [self.records[k] for k in keys]
+        return out
+
+    def query(self, query_embeddings, n_results=10, include=("metadatas", "documents", "distances")):
+        self.queries.append({"n_results": n_results, "include": list(include)})
+        hits = self.hits[:n_results]
+        out = {"ids": [hits], "distances": [[0.9 + 0.01 * i for i in range(len(hits))]]}
+        if "metadatas" in include:
+            out["metadatas"] = [[self.records.get(h) for h in hits]]
+        return out
+
+
+def vector_records(kind: str = "api", shift: int = 0, rename=None) -> dict[str, dict]:
+    """Records for the tiny tables, as the pipeline would store them.
+
+    kind "api": metadata {"name", "info"} per revit_api row; "sdk": {"project"}
+    per sdk_info row. shift: the record of row r gets id ((r - 1 + shift) % n) + 1,
+    so with a shift every id names a different row than the record's (ids
+    misaligned, names intact). rename(name) -> name replaces the entry names.
+    """
+    names = [r[0] for r in API_ROWS] if kind == "api" else [r[0] for r in SDK_ROWS]
+    n = len(names)
+    records: dict[str, dict] = {}
+    for row_id, name in enumerate(names, 1):
+        rid = ((row_id - 1 + shift) % n) + 1
+        value = rename(name) if rename else name
+        records[str(rid)] = {"name": value, "info": ""} if kind == "api" else {"project": value}
+    return records
+
+
+@pytest.fixture
+def fake_vectors():
+    """(FakeCollection, vector_records): build stand-in collections over the tiny tables."""
+    return FakeCollection, vector_records
+
+
 @pytest.fixture(autouse=True)
 def _no_jev_or_rerank_overrides(monkeypatch):
-    """No test reaches TypeSafe by accident or inherits a rerank override."""
-    for name in ("TYPESAFE_API_KEY", *RERANK_VARS):
+    """No test reaches TypeSafe or Cohere by accident or inherits a rerank override
+    (with provider auto a key alone selects a reranker)."""
+    for name in ("TYPESAFE_API_KEY", "COHERE_API_KEY", *RERANK_VARS):
         monkeypatch.delenv(name, raising=False)
 
 

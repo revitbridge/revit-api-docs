@@ -8,7 +8,8 @@ Everything is local once the data set is installed. On the first run the
 server answers immediately and downloads the data set (about 335 MB) in the
 background; tool calls made before it is ready get a short status message
 instead of a result (followed by any matching environment notes, which ship
-with the package). `revit-api-docs download` fetches it ahead of time.
+with the package). `revit-api-docs download` fetches it ahead of time and
+reports whether the vector store's records line up with the SQLite rows.
 
 Transports: stdio (default; stdout is the MCP transport, all diagnostics go to
 stderr) or streamable HTTP (`serve --transport http`), which has no built-in
@@ -75,7 +76,7 @@ mcp = MCPServer(
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
 
-# ── Retriever lifecycle ──────────────────────────────────────────────────────
+# -- Retriever lifecycle -------------------------------------------------------
 
 class _State:
     """Data download + retriever construction, shared by the tools."""
@@ -217,7 +218,7 @@ def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
     return ctx.get("code_context") or f"No SDK examples found for {query!r}."
 
 
-# ── Tools ────────────────────────────────────────────────────────────────────
+# -- Tools ---------------------------------------------------------------------
 
 @mcp.tool(annotations=_READ_ONLY)
 async def search_revit_api(query: str, top_k: int = 10) -> str:
@@ -256,7 +257,7 @@ async def get_code_examples(query: str, top_k: int = 3) -> str:
     return await asyncio.to_thread(search_examples, _state.retriever, query.strip(), n)
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
+# -- CLI -----------------------------------------------------------------------
 
 def _configure_logging(verbose: bool) -> None:
     """Plain stderr logging for the `download`, `search` and `environment` subcommands.
@@ -303,6 +304,27 @@ def _revit_release(text: str):
         return parse_version(text)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def vector_store_report(paths) -> list[str]:
+    """Lines for `download`: the consistency probe of both vector collections.
+
+    The probe needs no embedding key. A collection whose entry names are not
+    found in SQLite turns vector search off (keyword search still works).
+    """
+    from revit_api_docs.retriever import check_vector_stores
+
+    try:
+        probes = check_vector_stores(str(paths.api_db), str(paths.sdk_db),
+                                     str(paths.chromadb_api), str(paths.chromadb_code))
+    except Exception as e:
+        return [f"vector store check failed ({type(e).__name__}: {str(e)[:200]}); vector search "
+                "will be off when it fails the same way at query time"]
+    lines = [f"vector store check: {p.describe()}" for p in probes]
+    if any(p.status == "unusable" for p in probes):
+        lines.append("vector search stays off for this data set, even with an embedding key; "
+                     "keyword search is not affected")
+    return lines
 
 
 def serve(transport: str = "stdio", host: str = DEFAULT_HTTP_HOST, port: int = DEFAULT_HTTP_PORT) -> None:
@@ -352,7 +374,8 @@ def main(argv: list[str] | None = None) -> int:
                          help=f"bind address for --transport http (default {DEFAULT_HTTP_HOST})")
     p_serve.add_argument("--port", type=_port, default=None,
                          help=f"port for --transport http (default {DEFAULT_HTTP_PORT})")
-    sub.add_parser("download", help="install the data set now instead of on first use")
+    sub.add_parser("download", help="install the data set now instead of on first use, "
+                                    "then check that its vector store lines up with the SQLite rows")
     p_search = sub.add_parser("search", help="query from the terminal (installs the data set if needed)")
     p_search.add_argument("query")
     p_search.add_argument("--examples", action="store_true", help="SDK code examples instead of API entries")
@@ -373,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "download":
         paths = data.ensure_data(progress=data.stderr_progress)
         print(f"data ready in {paths.root}", file=sys.stderr)
+        for line in vector_store_report(paths):
+            print(line, file=sys.stderr)
         return 0
 
     if args.command == "search":

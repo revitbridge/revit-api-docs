@@ -132,7 +132,7 @@ def test_search_results_dataclass_defaults():
     assert sr.api_items == [] and sr.sdk_items == [] and sr.rewritten_query == ""
 
 
-# ── config ──────────────────────────────────────────────────────────────────
+# -- config --------------------------------------------------------------------
 
 def test_env_overrides_embedding(monkeypatch):
     monkeypatch.setenv("REVIT_API_DOCS_EMBEDDING_API_KEY", "x")
@@ -163,7 +163,7 @@ def test_default_config_has_pipeline_sections():
     assert "sk-" not in text and "api_key:" not in text
 
 
-# ── degraded vector search ──────────────────────────────────────────────────
+# -- degraded vector search ----------------------------------------------------
 
 class _BrokenEmbedder:
     calls = 0
@@ -173,9 +173,11 @@ class _BrokenEmbedder:
         raise RuntimeError("401 API key expired")
 
 
-def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, monkeypatch, caplog):
+def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, monkeypatch, caplog, fake_vectors):
     r = keyword_only_retriever
     r._embedder = _BrokenEmbedder()
+    collection, records = fake_vectors
+    r._api_collection, r._code_collection = collection(records("api")), collection(records("sdk"))
     monkeypatch.setattr(r, "_open_collections", lambda: None)
     caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
 
@@ -191,7 +193,7 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
     assert _BrokenEmbedder.calls == 3
 
 
-# ── candidate selection ─────────────────────────────────────────────────────
+# -- candidate selection -------------------------------------------------------
 
 @pytest.mark.parametrize("scorer", [BM25, "like"])
 def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeypatch, tmp_path, scorer):
@@ -225,7 +227,7 @@ def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeyp
     assert len(r._keyword_candidates(r._normalize_search_tokens("floor"))) == 50
 
 
-# ── lazy collection opening under concurrency ───────────────────────────────
+# -- lazy collection opening under concurrency ---------------------------------
 
 def test_open_collections_is_thread_safe(keyword_only_retriever, monkeypatch):
     """Two first queries in parallel worker threads must open each collection
@@ -250,10 +252,17 @@ def test_open_collections_is_thread_safe(keyword_only_retriever, monkeypatch):
             opened.append(name)
             return _Collection(name)
 
+    settings_seen: list[object] = []
+
+    class _Settings:
+        def __init__(self, **kw):
+            self.kw = kw
+            settings_seen.append(self)
+
     fake = types.ModuleType("chromadb")
     fake.PersistentClient = _Client
     fake_config = types.ModuleType("chromadb.config")
-    fake_config.Settings = lambda **kw: kw
+    fake_config.Settings = _Settings
     fake.config = fake_config
     monkeypatch.setitem(sys.modules, "chromadb", fake)
     monkeypatch.setitem(sys.modules, "chromadb.config", fake_config)
@@ -274,53 +283,52 @@ def test_open_collections_is_thread_safe(keyword_only_retriever, monkeypatch):
     assert opened == ["revit_api", "revit_sdk"]  # each collection opened exactly once
     assert all(a is not None and c is not None for a, c in seen)
     assert {c.name for _, c in seen} == {"revit_sdk"} and {a.name for a, _ in seen} == {"revit_api"}
+    # One Settings object per client: chromadb writes the path into the object
+    # it gets, and a shared one broke a second retriever in the same process.
+    assert len(settings_seen) == 2 and settings_seen[0] is not settings_seen[1]
+    assert all(s.kw == {"anonymized_telemetry": False} for s in settings_seen)
 
 
-# ── vector tier honours top_k=0 ─────────────────────────────────────────────
+# -- vector tier honours top_k=0 -----------------------------------------------
 
 class _ZeroEmbedder:
     def embed_query(self, query):
         return [0.0, 0.0]
 
 
-class _RecordingCollection:
-    def __init__(self, ids):
-        self.ids = ids
-        self.calls: list[int] = []
-
-    def query(self, query_embeddings, n_results):
-        self.calls.append(n_results)
-        return {"ids": [self.ids[:n_results]], "distances": [[0.1] * min(n_results, len(self.ids))]}
-
-
 @pytest.fixture
-def vector_retriever(keyword_only_retriever, monkeypatch):
+def vector_retriever(keyword_only_retriever, monkeypatch, fake_vectors):
     r = keyword_only_retriever
+    collection, records = fake_vectors
     r._embedder = _ZeroEmbedder()
-    r._api_collection = _RecordingCollection(["1", "2", "3"])
-    r._code_collection = _RecordingCollection(["1", "2"])
+    r._api_collection = collection(records("api"), hits=["1", "2", "3"])
+    r._code_collection = collection(records("sdk"), hits=["1", "2"])
     monkeypatch.setattr(r, "_open_collections", lambda: None)
     return r
+
+
+def _calls(collection) -> list[int]:
+    return [q["n_results"] for q in collection.queries]
 
 
 def test_code_top_k_zero_skips_the_code_collection_even_with_rerank(vector_retriever):
     r = vector_retriever
     # what search_revit_api does: rerank on, no code examples wanted
     results = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
-    assert r._code_collection.calls == []
-    assert r._api_collection.calls == [r._api_top_k]  # broad recall for the reranker
+    assert _calls(r._code_collection) == []
+    assert _calls(r._api_collection) == [r._api_top_k]  # broad recall for the reranker
     assert results.sdk_items == [] and results.api_items
 
 
 def test_api_top_k_zero_skips_the_api_collection(vector_retriever):
     r = vector_retriever
     results = r.search("wall", api_top_k=0, code_top_k=2, rewrite=False, rerank=True)
-    assert r._api_collection.calls == []
-    assert r._code_collection.calls == [r._code_top_k]
+    assert _calls(r._api_collection) == []
+    assert _calls(r._code_collection) == [r._code_top_k]
     assert results.api_items == [] and len(results.sdk_items) == 2
 
 
-# ── provider selection failures degrade, as documented ──────────────────────
+# -- provider selection failures degrade, as documented ------------------------
 
 @pytest.mark.parametrize("provider, reason", [
     ("local_hf", "not implemented"),
