@@ -61,6 +61,17 @@ def cohere_transport(scores: list[float], calls: list | None = None, *, status: 
     return httpx.MockTransport(handler)
 
 
+def jev_position_transport(scores: list[float]):
+    """MockTransport giving the i-th candidate of the request the score scores[i]."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        answers = {qid: {"type": "noul", "noul": scores[int(qid[1:])]} for qid in body["questions"]}
+        return httpx.Response(200, json={"model": "jev-1.14.0", "answers": answers})
+
+    return httpx.MockTransport(handler)
+
+
 def jev(transport, **kw) -> JevReranker:
     kw.setdefault("sleep", lambda s: None)
     return JevReranker(transport=transport, **kw)
@@ -446,12 +457,48 @@ def test_abstains_when_every_candidate_is_below_the_threshold(tiny_dbs, tmp_path
     assert r.format_results(res).splitlines()[1] == "abstained: best relevance 0.07 < 0.20"
 
 
-def test_threshold_drops_low_candidates_without_abstaining(tiny_dbs, tmp_path, monkeypatch, jev_key):
+def test_threshold_keeps_low_candidates_with_their_relevance(tiny_dbs, tmp_path, monkeypatch, jev_key):
+    """The threshold only decides abstention: once one candidate reaches it,
+    the ones below it are still returned, each with its relevance."""
     r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.2",
                    chain=[jev(jev_transport(_wall_create_first))])
     res = r.search("wall", api_top_k=5, code_top_k=0, rewrite=False, rerank=True)
-    assert not res.abstained
-    assert [i.full_id for i in res.api_items] == ["Wall.Create"]
+    assert not res.abstained and res.abstain_reason == ""
+    assert res.api_items[0].full_id == "Wall.Create"
+    assert res.api_items[0].relevance == pytest.approx(0.91)
+    below = res.api_items[1:]
+    assert len(below) == 4 and all(i.relevance == pytest.approx(0.12) for i in below)
+
+    lines = server.search_api(r, "wall", 5).splitlines()
+    assert lines[0] == "Rerank: jev" and lines[1] == ""
+    assert lines[2] == "### Wall.Create" and lines[3] == "Relevance: 0.91"
+    assert lines.count("Relevance: 0.12") == 4
+
+
+@pytest.mark.parametrize("scores, abstains", [
+    ([0.9, 0.3, 0.1], False),
+    ([0.3, 0.1], True),
+])
+def test_threshold_decides_abstention_only(tiny_dbs, tmp_path, monkeypatch, jev_key, scores, abstains):
+    """Threshold 0.5: [0.9, 0.3, 0.1] returns all three without abstaining;
+    [0.3, 0.1] abstains and keeps both candidates for reference."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.5",
+                   chain=[jev(jev_position_transport(scores))])
+    keyword = r._keyword_search_api
+    monkeypatch.setattr(r, "_keyword_search_api", lambda q, limit: keyword(q, limit=limit)[:len(scores)])
+
+    res = r.search("wall", api_top_k=5, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "jev" and res.abstained is abstains
+    assert [i.relevance for i in res.api_items] == pytest.approx(scores)
+    assert res.abstain_reason == ("best relevance 0.30 < 0.50" if abstains else "")
+
+    lines = server.search_api(r, "wall", 5).splitlines()
+    assert [ln for ln in lines if ln.startswith("Relevance: ")] == [f"Relevance: {s:.2f}" for s in scores]
+    if abstains:
+        assert lines[0].startswith("No entry in the Revit 2026 data set scored high enough")
+        assert lines[1] == "Rerank: jev. Low-relevance candidates, for reference only:"
+    else:
+        assert lines[0] == "Rerank: jev" and lines[1] == ""
 
 
 def test_no_threshold_never_abstains(tiny_dbs, tmp_path, monkeypatch, jev_key):

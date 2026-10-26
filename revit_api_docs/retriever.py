@@ -25,9 +25,13 @@ Degraded modes (no network keys needed for the MCP server to be useful):
     - No LLM key            -> query rewriting is skipped.
 
 Abstention: with rerank provider "jev" and retrieval.api.min_relevance set,
-candidates below the threshold are dropped; when none reaches it the result
-is marked abstained (the low-scoring candidates stay for reference). Other
-providers never abstain: their scores are not calibrated probabilities.
+the result is marked abstained when no candidate reaches the threshold (the
+candidates stay for reference). The threshold decides only that: whether or
+not the result abstains, every reranked candidate comes back (up to the
+requested count) with its relevance, below the threshold or not. A low best
+score says the data set has nothing relevant to the query, or words it
+differently; it does not show that a member does not exist. Other providers
+never abstain: their scores are not calibrated probabilities.
 """
 from __future__ import annotations
 
@@ -84,6 +88,8 @@ class SearchResults:
     # (for example ["jev"] when Jev failed and Cohere took over).
     rerank_skipped: list[str] = field(default_factory=list)
     # True when Jev scored every candidate below retrieval.api.min_relevance.
+    # The threshold only sets this flag: api_items keep every reranked
+    # candidate, each with its relevance, whether or not it reaches it.
     abstained: bool = False
     abstain_reason: str = ""  # e.g. "best relevance 0.07 < 0.20"
 
@@ -481,12 +487,11 @@ class RAGRetriever:
                 reranked_ok = True
 
                 # Abstention: only calibrated scores may be held to a fixed threshold.
+                # The threshold decides whether to abstain and nothing else:
+                # candidates below it stay in the result with their relevance.
                 if calibrated and self._min_relevance is not None and api_items:
-                    passing = [i for i in api_items if (i.relevance or 0.0) >= self._min_relevance]
-                    if passing:
-                        api_items = passing
-                    else:
-                        best = max(i.relevance or 0.0 for i in api_items)
+                    best = max(i.relevance or 0.0 for i in api_items)
+                    if best < self._min_relevance:
                         abstained = True
                         abstain_reason = f"best relevance {best:.2f} < {self._min_relevance:.2f}"
                 break
