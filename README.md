@@ -99,11 +99,13 @@ reference: BM25 over a full-text index of entry names, IDs, summaries and
 signatures, where identifiers also match by their camel-case parts, so a
 misspelt or unknown name still gets candidates. The index (11.8 MB) is built
 next to the data set on first use (under a second). With an embedding key it
-adds semantic search over the vector store, and with a Cohere key it reranks
-the merged candidates; with a TypeSafe key it can rerank with Jev instead, which
-returns a calibrated relevance per entry. With a threshold set and no entry
-reaching it, the output starts with an abstention line and then lists the
-candidates with their relevance, for reference. See Configure.
+adds semantic search over the vector store and fuses the two rankings by rank,
+which helps most with task descriptions that do not name the API. With a
+TypeSafe key it reranks the candidates with Jev, which returns a calibrated
+relevance per entry; with only a Cohere key it reranks with Cohere. With a Jev
+threshold set and no entry reaching it, the output starts with an abstention
+line and then lists the candidates with their relevance, for reference. See
+Configure.
 
 Try it from a terminal (installs the data set if needed):
 
@@ -124,9 +126,9 @@ All settings are environment variables; there is no config file to edit.
 | `REVIT_API_DOCS_EMBEDDING_API_KEY` | *(unset)* | Key for the embedding endpoint; turns on semantic (vector) search. `OPENROUTER_API_KEY` is used when this is unset |
 | `REVIT_API_DOCS_EMBEDDING_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/embeddings` endpoint |
 | `REVIT_API_DOCS_EMBEDDING_MODEL` | `openai/text-embedding-3-large` | Must produce the same 3072-dimensional space the shipped vectors were built with (`text-embedding-3-large`); another model makes vector search return noise |
-| `COHERE_API_KEY` | *(unset)* | Enables reranking with Cohere `rerank-v3.5` (native REST API) |
-| `REVIT_API_DOCS_RERANK_PROVIDER` | `cohere` | `cohere`, `jev` or `none`. With `jev`, a failed or unconfigured Jev call falls back to Cohere when `COHERE_API_KEY` is set, otherwise to no reranking; the first output line says which one ran |
-| `TYPESAFE_API_KEY` | *(unset)* | Key for TypeSafe System One (Jev), used when the provider is `jev`. At most 30 candidates per request, 2 requests in flight, 2 retries, 20 s timeout |
+| `TYPESAFE_API_KEY` | *(unset)* | Key for TypeSafe System One (Jev), the recommended reranker: with the default provider `auto` setting this key is enough. At most 30 candidates per request, 2 requests in flight, 2 retries, 20 s timeout |
+| `COHERE_API_KEY` | *(unset)* | Optional. Cohere `rerank-v3.5` (native REST API, 20 s timeout): reranks when it is the only rerank key set, and is the fallback for a failed Jev call when both are set |
+| `REVIT_API_DOCS_RERANK_PROVIDER` | `auto` | `auto`, `jev`, `cohere` or `none`. `auto` reranks with Jev when `TYPESAFE_API_KEY` is set, otherwise with Cohere when `COHERE_API_KEY` is set, otherwise not at all; an explicit value wins. With Jev, a failed or unconfigured call falls back to Cohere when `COHERE_API_KEY` is set, otherwise to no reranking; the first output line says which one ran |
 | `REVIT_API_DOCS_JEV_MODEL` | `jev-latest` | Jev model or alias; pin a version such as `jev-1.14.0` for reproducible results |
 | `REVIT_API_DOCS_MIN_RELEVANCE` | *(unset)* | Probability 0-1 (`retrieval.api.min_relevance`). Only honoured while Jev ranks the results, and it only decides whether to abstain: no entry is dropped, every result keeps its `Relevance` line. When no entry reaches it, `search_revit_api` starts with "No entry in the Revit 2026 data set scored high enough for this query", notes that the member may be absent from this version or listed under a different name or wording, and lists the low-scoring candidates for reference. No effect with Cohere or without reranking. See "Reranking with Jev" below |
 | `REVIT_API_DOCS_RELEASE_URL` | this repository's `v1.0-data` release | Mirror for the data files; the SHA-256 checks still apply |
@@ -134,12 +136,19 @@ All settings are environment variables; there is no config file to edit.
 
 Pass them through the `env` block of your MCP host's server entry.
 
-**Reranking with Jev.** If you have a `TYPESAFE_API_KEY`,
-`REVIT_API_DOCS_RERANK_PROVIDER=jev` is the recommended setting (the default
-provider stays `cohere`). On 60 English test queries (50 with a known answer)
-over the keyword (BM25) candidates, with no embedding key, Jev raised nDCG@5
-from 0.675 to 0.871 and never turned a correct top-5 answer into a miss.
-Input tokens cost about $0.23 per 1,000 queries.
+Recommended setup: a `TYPESAFE_API_KEY` (Jev reranking), plus an embedding key
+when requests describe multi-step tasks rather than name APIs. Without any key
+the server runs on BM25 keyword search alone.
+
+**Reranking with Jev.** Jev is the recommended reranker, and the default
+provider (`auto`) uses it whenever `TYPESAFE_API_KEY` is set. Cohere is
+optional: `auto` uses it when only `COHERE_API_KEY` is set, and with both keys
+it is the fallback for a failed Jev call. On 60 English test queries (50 with a
+known answer) over the keyword (BM25) candidates, with no embedding key, Jev
+raised nDCG@5 from 0.675 to 0.871 and never turned a correct top-5 answer into
+a miss. On 223 further queries over the same candidates Jev reached an nDCG@5
+of 0.788 against Cohere's 0.674. Input tokens cost about $0.23 per 1,000
+queries; Cohere bills $2 per 1,000 searches.
 `REVIT_API_DOCS_MIN_RELEVANCE` stays unset by default. Set to 0.15 it filters
 out clearly unrelated queries (questions that are not about Revit, types this
 data set does not have), abstaining on about 2.5% of the queries that do have
@@ -148,6 +157,23 @@ usually gets the closest real API as the first result, to be confirmed with a
 compile check. **Do not use 0.5**: it abstained on 14% of the queries that
 have an answer. What TypeSafe keeps: see the `jev-data-handling` note
 (`uvx revit-api-docs environment typesafe`).
+
+**Vector search.** An embedding key (`REVIT_API_DOCS_EMBEDDING_API_KEY`, or
+`OPENROUTER_API_KEY`) turns it on; each query then costs one embedding request
+(about 0.9 s). The vector hits and the BM25 hits, 30 of each, are fused by
+reciprocal rank (score = sum of 1 / (60 + rank)) and the best 30 go to the
+reranker; without a reranker they are cut to `top_k`. On 223 English test
+queries without reranking, fusion raised nDCG@5 from 0.565 (BM25 alone) to
+0.610, and on the 113 of them that describe a multi-step task from 0.365 to
+0.438, with an answer among the top 30 for 84% of those instead of 73%. The
+`v1.0-data` vector store numbers its records differently from the rows of
+`revit_api.db`, so each vector hit is matched to its entry by name. On the
+first vector query the server samples 50 records of each vector collection:
+when the record ids do not line up with the rows it logs the warning
+`vector_store_misaligned` and keeps matching by name (expected with
+`v1.0-data`); when the names are not found either, it turns vector search off
+until the server restarts and answers from keyword search. `revit-api-docs download`
+prints the same check for the installed data set.
 
 Privacy: with an embedding, Cohere or TypeSafe key the query text and the
 candidate API entries (public documentation) are sent to that provider. Keep
