@@ -15,10 +15,10 @@ development-environment notes.
 
 **Upgrading from 0.1.0** (`uvx --refresh revit-api-docs`): the first search
 builds `sqlite/revit_api_fts.db` (an FTS5 index, 11.8 MB) next to the data set
-in under a second. `search_revit_api` output starts with a `Rerank:` line.
-Abstention is new and opt-in: `REVIT_API_DOCS_MIN_RELEVANCE` (Jev only) only
-decides whether to abstain and drops no entry; the abstention line does not
-claim that the member is missing.
+in under a second. `search_revit_api` output starts with `Rerank: <reranker>;
+data set: Revit 2026`. Abstention is new and opt-in:
+`REVIT_API_DOCS_MIN_RELEVANCE` (Jev only) only decides whether to abstain and
+drops no entry; the abstention line does not claim that the member is missing.
 
 ### Added
 
@@ -66,6 +66,13 @@ claim that the member is missing.
 
 ### Changed
 
+- The `Rerank:` line also names the data set the entries come from: `Rerank:
+  <provider>[ (unavailable: ...)]; data set: Revit <version>`, the version
+  taken from the configuration (`revit_version`, 2026 for the v1.0-data
+  release). It stays the first line, or the second after an abstention line,
+  so an answer can cite the data set version next to a result; the tool
+  description and the server instructions say so. The `Rerank:` prefix is
+  unchanged.
 - `REVIT_API_DOCS_MIN_RELEVANCE` only decides whether to abstain. When at
   least one entry reaches it, the entries below it are no longer dropped:
   every reranked entry comes back (up to `top_k`) with its `Relevance`, so a

@@ -426,7 +426,7 @@ def test_jev_orders_results_and_reports_relevance(tiny_dbs, tmp_path, monkeypatc
 
     text = server.search_api(r, "wall", 3)
     lines = text.splitlines()
-    assert lines[0] == "Rerank: jev" and lines[1] == ""
+    assert lines[0] == "Rerank: jev; data set: Revit 2026" and lines[1] == ""
     assert lines[2] == "### Wall.Create" and lines[3] == "Relevance: 0.91"
     assert r.format_results(res).splitlines()[0] == "rerank:    jev"
 
@@ -447,7 +447,7 @@ def test_jev_failure_falls_back_to_cohere(tiny_dbs, tmp_path, monkeypatch, jev_k
     assert all(i.relevance is None for i in res.api_items) and len(res.api_items) == 2
     assert "rerank provider jev failed" in caplog.text
     text = server.search_api(r, "wall", 2)
-    assert text.splitlines()[0] == "Rerank: cohere (unavailable: jev)"
+    assert text.splitlines()[0] == "Rerank: cohere (unavailable: jev); data set: Revit 2026"
     assert "Relevance:" not in text
 
 
@@ -459,7 +459,7 @@ def test_jev_failure_without_cohere_keeps_retrieval_order(tiny_dbs, tmp_path, mo
     expected = plain.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
     assert res.rerank_used == "none" and res.rerank_skipped == ["jev"] and not res.abstained
     assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
-    assert server.search_api(r, "Wall.Create", 3).splitlines()[0] == "Rerank: none (unavailable: jev)"
+    assert server.search_api(r, "Wall.Create", 3).splitlines()[0] == "Rerank: none (unavailable: jev); data set: Revit 2026"
 
 
 def test_jev_selected_without_a_key_is_reported(tiny_dbs, tmp_path, monkeypatch):
@@ -487,7 +487,7 @@ def test_abstains_when_every_candidate_is_below_the_threshold(tiny_dbs, tmp_path
         "has it under a different name or wording; check the name and version, or rephrase.")
     assert "absent from this version" in lines[0] and "different name or wording" in lines[0]
     assert "may not exist" not in lines[0]
-    assert lines[1].startswith("Rerank: jev.") and "for reference only" in lines[1]
+    assert lines[1] == "Rerank: jev; data set: Revit 2026. Low-relevance candidates, for reference only:"
     assert lines.count("Relevance: 0.07") == 3
     assert r.format_results(res).splitlines()[1] == "abstained: best relevance 0.07 < 0.20"
 
@@ -505,7 +505,7 @@ def test_threshold_keeps_low_candidates_with_their_relevance(tiny_dbs, tmp_path,
     assert len(below) == 4 and all(i.relevance == pytest.approx(0.12) for i in below)
 
     lines = server.search_api(r, "wall", 5).splitlines()
-    assert lines[0] == "Rerank: jev" and lines[1] == ""
+    assert lines[0] == "Rerank: jev; data set: Revit 2026" and lines[1] == ""
     assert lines[2] == "### Wall.Create" and lines[3] == "Relevance: 0.91"
     assert lines.count("Relevance: 0.12") == 4
 
@@ -531,9 +531,9 @@ def test_threshold_decides_abstention_only(tiny_dbs, tmp_path, monkeypatch, jev_
     assert [ln for ln in lines if ln.startswith("Relevance: ")] == [f"Relevance: {s:.2f}" for s in scores]
     if abstains:
         assert lines[0].startswith("No entry in the Revit 2026 data set scored high enough")
-        assert lines[1] == "Rerank: jev. Low-relevance candidates, for reference only:"
+        assert lines[1] == "Rerank: jev; data set: Revit 2026. Low-relevance candidates, for reference only:"
     else:
-        assert lines[0] == "Rerank: jev" and lines[1] == ""
+        assert lines[0] == "Rerank: jev; data set: Revit 2026" and lines[1] == ""
 
 
 def test_no_threshold_never_abstains(tiny_dbs, tmp_path, monkeypatch, jev_key):
@@ -548,7 +548,7 @@ def test_min_relevance_has_no_effect_with_cohere(tiny_dbs, tmp_path, monkeypatch
     res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
     assert res.rerank_used == "cohere" and not res.abstained
     assert len(res.api_items) == 3 and all(i.relevance is None for i in res.api_items)
-    assert server.search_api(r, "wall", 3).splitlines()[0] == "Rerank: cohere"
+    assert server.search_api(r, "wall", 3).splitlines()[0] == "Rerank: cohere; data set: Revit 2026"
 
 
 @pytest.mark.parametrize("value, expected", [

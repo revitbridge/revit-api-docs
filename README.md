@@ -84,11 +84,13 @@ Two tools, both read-only:
   and remarks. Query with an API name (`Wall.Create`,
   `FilteredElementCollector OfCategory`) or a short task (`create floor from
   boundary`). The first line names the reranker that ordered the entries
-  (`Rerank: jev`, `cohere` or `none`). Development-environment questions
-  (`target framework for Revit 2027 add-in`) also get up to five curated
-  environment notes (framework, SDK, manifest, reference packages per Revit
-  release, each with its source); these ship with the package and work before
-  the data set is installed and without any key.
+  (`jev`, `cohere` or `none`) and the data set they come from, for example
+  `Rerank: none; data set: Revit 2026`; after an abstention line it is the
+  second line. Development-environment questions (`target framework for
+  Revit 2027 add-in`) also get up to five curated environment notes
+  (framework, SDK, manifest, reference packages per Revit release, each with
+  its source); these ship with the package and work before the data set is
+  installed and without any key.
 - `get_code_examples(query, top_k=3)` — C# from the SDK samples that use the
   matching APIs, with the project name and the APIs each sample touches.
 
