@@ -1,0 +1,633 @@
+# Second retrieval regression query set for the Revit 2026 API reference (data
+# release v1.0-data: sqlite/revit_api.db, 27,596 rows), written separately
+# from retrieval_queries.yaml with no query in common. English queries and
+# public API names only; used by tests/test_bm25_recall.py, which needs no
+# network.
+#
+# Groups (15 N, 15 T, 10 F, 20 X):
+#   N  an API name, as a model asks once it knows roughly what it wants
+#   T  a short task description in plain English
+#   F  an outdated or removed API name, or a member put on the wrong class;
+#      the gold is the current API that does the job
+#   X  nothing in the data set answers it: Revit 2027-only types; members
+#      that do not exist (a class name used as a member, a member of another
+#      class, a property that is really a parameter); misspellings; questions
+#      that are not about Revit or not about the API. For the non-existent
+#      members and the misspellings a nearby real API exists and is the
+#      useful answer, so a relevance threshold is not expected to reject them
+#
+# Fields:
+#   id, group, query  as above
+#   gold_members      the API members that answer the query (Type.Member, or
+#                     "Type Class" for a class page)
+#   gold              every revit_api row of those members: row id, full_id,
+#                     name. A member can span several rows (the overload-group
+#                     page plus one page per overload); any gold row in the top
+#                     5 counts as a hit
+#   absent            group X only: what must not exist in revit_api.db.
+#                     names: prefix match on name or substring of full_id;
+#                     name_terms: substring of name or full_id; terms: substring
+#                     of name, full_id, summary, syntax, remark, members,
+#                     parameters or info
+#   verified          gold rows and absences were checked against revit_api.db
+#   verify_note       what that check found
+#   note              what the query is about (API facts only)
+queries:
+- id: v2-N01
+  group: N
+  query: ViewPlan.Create
+  gold_members: [ViewPlan.Create]
+  gold:
+  - {id: 22476, full_id: ViewPlan.Create, name: ViewPlan.Create Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: views'
+- id: v2-N02
+  group: N
+  query: View3D CreateIsometric
+  gold_members: [View3D.CreateIsometric]
+  gold:
+  - {id: 7803, full_id: View3D.CreateIsometric, name: View3D.CreateIsometric Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: views'
+- id: v2-N03
+  group: N
+  query: ViewSchedule.CreateSchedule
+  gold_members: [ViewSchedule.CreateSchedule]
+  gold:
+  - {id: 7045, full_id: 'M:Autodesk.Revit.DB.ViewSchedule.CreateSchedule(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId)', name: 'ViewSchedule.CreateSchedule(Document, ElementId) Method'}
+  - {id: 9049, full_id: 'M:Autodesk.Revit.DB.ViewSchedule.CreateSchedule(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId)', name: 'ViewSchedule.CreateSchedule(Document, ElementId, ElementId) Method'}
+  - {id: 14740, full_id: ViewSchedule.CreateSchedule, name: ViewSchedule.CreateSchedule Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: 'area: schedules'
+- id: v2-N04
+  group: N
+  query: ViewSheet.Create
+  gold_members: [ViewSheet.Create]
+  gold:
+  - {id: 8865, full_id: ViewSheet.Create, name: ViewSheet.Create Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: sheets'
+- id: v2-N05
+  group: N
+  query: Category GetCategory
+  gold_members: [Category.GetCategory]
+  gold:
+  - {id: 1591, full_id: 'M:Autodesk.Revit.DB.Category.GetCategory(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId)', name: 'Category.GetCategory(Document, ElementId) Method'}
+  - {id: 10269, full_id: 'M:Autodesk.Revit.DB.Category.GetCategory(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.BuiltInCategory)', name: 'Category.GetCategory(Document, BuiltInCategory) Method'}
+  - {id: 13219, full_id: Category.GetCategory, name: Category.GetCategory Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: 'area: categories'
+- id: v2-N06
+  group: N
+  query: Parameter AsValueString
+  gold_members: [Parameter.AsValueString]
+  gold:
+  - {id: 9218, full_id: Parameter.AsValueString, name: Parameter.AsValueString Method}
+  - {id: 15456, full_id: 'M:Autodesk.Revit.DB.Parameter.AsValueString(Autodesk.Revit.DB.FormatOptions)', name: Parameter.AsValueString(FormatOptions) Method}
+  - {id: 23998, full_id: 'M:Autodesk.Revit.DB.Parameter.AsValueString', name: Parameter.AsValueString Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: 'area: parameters'
+- id: v2-N07
+  group: N
+  query: FamilyManager.AddParameter
+  gold_members: [FamilyManager.AddParameter]
+  gold:
+  - {id: 16089, full_id: 'M:Autodesk.Revit.DB.FamilyManager.AddParameter(Autodesk.Revit.DB.ExternalDefinition,Autodesk.Revit.DB.ForgeTypeId,System.Boolean)', name: 'FamilyManager.AddParameter(ExternalDefinition, ForgeTypeId, Boolean) Method'}
+  - {id: 19748, full_id: 'M:Autodesk.Revit.DB.FamilyManager.AddParameter(System.String,Autodesk.Revit.DB.ForgeTypeId,Autodesk.Revit.DB.ForgeTypeId,System.Boolean)', name: 'FamilyManager.AddParameter(String, ForgeTypeId, ForgeTypeId, Boolean)
+      Method'}
+  - {id: 22611, full_id: 'M:Autodesk.Revit.DB.FamilyManager.AddParameter(System.String,Autodesk.Revit.DB.ForgeTypeId,Autodesk.Revit.DB.Category,System.Boolean)', name: 'FamilyManager.AddParameter(String, ForgeTypeId, Category, Boolean) Method'}
+  - {id: 22715, full_id: FamilyManager.AddParameter, name: FamilyManager.AddParameter Method}
+  verified: true
+  verify_note: 4 DB rows for 1 member(s)
+  note: 'area: families'
+- id: v2-N08
+  group: N
+  query: SpatialElement GetBoundarySegments
+  gold_members: [SpatialElement.GetBoundarySegments]
+  gold:
+  - {id: 16013, full_id: SpatialElement.GetBoundarySegments, name: SpatialElement.GetBoundarySegments Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: rooms'
+- id: v2-N09
+  group: N
+  query: Solid.Volume
+  gold_members: [Solid.Volume]
+  gold:
+  - {id: 8433, full_id: Solid.Volume, name: Solid.Volume Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: geometry'
+- id: v2-N10
+  group: N
+  query: XYZ DistanceTo
+  gold_members: [XYZ.DistanceTo]
+  gold:
+  - {id: 25860, full_id: XYZ.DistanceTo, name: XYZ.DistanceTo Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: geometry'
+- id: v2-N11
+  group: N
+  query: OverrideGraphicSettings SetProjectionLineColor
+  gold_members: [OverrideGraphicSettings.SetProjectionLineColor]
+  gold:
+  - {id: 3573, full_id: OverrideGraphicSettings.SetProjectionLineColor, name: OverrideGraphicSettings.SetProjectionLineColor Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: view graphics'
+- id: v2-N12
+  group: N
+  query: TextNote.Create
+  gold_members: [TextNote.Create]
+  gold:
+  - {id: 3762, full_id: 'M:Autodesk.Revit.DB.TextNote.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.XYZ,System.Double,System.String,Autodesk.Revit.DB.TextNoteOptions)', name: 'TextNote.Create(Document, ElementId,
+      XYZ, Double, String, TextNoteOptions) Method'}
+  - {id: 9133, full_id: 'M:Autodesk.Revit.DB.TextNote.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.XYZ,System.Double,System.String,Autodesk.Revit.DB.ElementId)', name: 'TextNote.Create(Document, ElementId, XYZ,
+      Double, String, ElementId) Method'}
+  - {id: 17793, full_id: 'M:Autodesk.Revit.DB.TextNote.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.XYZ,System.String,Autodesk.Revit.DB.ElementId)', name: 'TextNote.Create(Document, ElementId, XYZ, String, ElementId)
+      Method'}
+  - {id: 18775, full_id: TextNote.Create, name: TextNote.Create Method}
+  - {id: 24362, full_id: 'M:Autodesk.Revit.DB.TextNote.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.XYZ,System.String,Autodesk.Revit.DB.TextNoteOptions)', name: 'TextNote.Create(Document, ElementId, XYZ, String,
+      TextNoteOptions) Method'}
+  verified: true
+  verify_note: 5 DB rows for 1 member(s)
+  note: 'area: annotation'
+- id: v2-N13
+  group: N
+  query: Level.Create
+  gold_members: [Level.Create]
+  gold:
+  - {id: 938, full_id: Level.Create, name: Level.Create Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: levels'
+- id: v2-N14
+  group: N
+  query: IndependentTag Create
+  gold_members: [IndependentTag.Create]
+  gold:
+  - {id: 12520, full_id: 'M:Autodesk.Revit.DB.IndependentTag.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.Reference,System.Boolean,Autodesk.Revit.DB.TagOrientation,Autodesk.Revit.DB.XYZ)',
+    name: 'IndependentTag.Create(Document, ElementId, ElementId, Reference, Boolean, TagOrientation, XYZ) Method'}
+  - {id: 20234, full_id: 'M:Autodesk.Revit.DB.IndependentTag.Create(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.ElementId,Autodesk.Revit.DB.Reference,System.Boolean,Autodesk.Revit.DB.TagMode,Autodesk.Revit.DB.TagOrientation,Autodesk.Revit.DB.XYZ)',
+    name: 'IndependentTag.Create(Document, ElementId, Reference, Boolean, TagMode, TagOrientation, XYZ) Method'}
+  - {id: 26102, full_id: IndependentTag.Create, name: IndependentTag.Create Method}
+  verified: true
+  verify_note: 3 DB rows for 1 member(s)
+  note: 'area: tags'
+- id: v2-N15
+  group: N
+  query: RevitLinkInstance GetLinkDocument
+  gold_members: [RevitLinkInstance.GetLinkDocument]
+  gold:
+  - {id: 26137, full_id: RevitLinkInstance.GetLinkDocument, name: RevitLinkInstance.GetLinkDocument Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: links'
+- id: v2-T01
+  group: T
+  query: put a floor plan view onto a sheet
+  gold_members: [Viewport.Create, Viewport.CanAddViewToSheet]
+  gold:
+  - {id: 8838, full_id: Viewport.Create, name: Viewport.Create Method}
+  - {id: 25115, full_id: Viewport.CanAddViewToSheet, name: Viewport.CanAddViewToSheet Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: sheets'
+- id: v2-T02
+  group: T
+  query: get the geometry of an element
+  gold_members: [Element.Geometry, Options Class, GeometryElement Class]
+  gold:
+  - {id: 26806, full_id: Element.Geometry, name: Element.Geometry Property}
+  - {id: 11623, full_id: Options, name: Options Class}
+  - {id: 5078, full_id: GeometryElement, name: GeometryElement Class}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 'area: geometry'
+- id: v2-T03
+  group: T
+  query: list all rooms with their area
+  gold_members: [SpatialElement.Area, RoomFilter Class, Room Class]
+  gold:
+  - {id: 15833, full_id: SpatialElement.Area, name: SpatialElement.Area Property}
+  - {id: 16005, full_id: RoomFilter, name: RoomFilter Class}
+  - {id: 1579, full_id: Room, name: Room Class}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 'area: rooms'
+- id: v2-T04
+  group: T
+  query: convert a length in millimeters to Revit internal units
+  gold_members: [UnitUtils.ConvertToInternalUnits, UnitUtils.Convert]
+  gold:
+  - {id: 6279, full_id: UnitUtils.ConvertToInternalUnits, name: UnitUtils.ConvertToInternalUnits Method}
+  - {id: 15769, full_id: UnitUtils.Convert, name: UnitUtils.Convert Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: units (opposite direction to v1 T03/T08)'
+- id: v2-T05
+  group: T
+  query: ask the user to click an element in the model
+  gold_members: [Selection.PickObject, Selection.PickObjects]
+  gold:
+  - {id: 4740, full_id: Selection.PickObject, name: Selection.PickObject Method}
+  - {id: 12062, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObject(Autodesk.Revit.UI.Selection.ObjectType,Autodesk.Revit.UI.Selection.ISelectionFilter)', name: 'Selection.PickObject(ObjectType, ISelectionFilter) Method'}
+  - {id: 13044, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObject(Autodesk.Revit.UI.Selection.ObjectType)', name: Selection.PickObject(ObjectType) Method}
+  - {id: 25103, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObject(Autodesk.Revit.UI.Selection.ObjectType,Autodesk.Revit.UI.Selection.ISelectionFilter,System.String)', name: 'Selection.PickObject(ObjectType, ISelectionFilter, String)
+      Method'}
+  - {id: 25554, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObject(Autodesk.Revit.UI.Selection.ObjectType,System.String)', name: 'Selection.PickObject(ObjectType, String) Method'}
+  - {id: 1545, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObjects(Autodesk.Revit.UI.Selection.ObjectType,Autodesk.Revit.UI.Selection.ISelectionFilter)', name: 'Selection.PickObjects(ObjectType, ISelectionFilter) Method'}
+  - {id: 4961, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObjects(Autodesk.Revit.UI.Selection.ObjectType,Autodesk.Revit.UI.Selection.ISelectionFilter,System.String,System.Collections.Generic.IList{Autodesk.Revit.DB.Reference})', name: 'Selection.PickObjects(ObjectType,
+      ISelectionFilter, String, IList<Reference>) Method'}
+  - {id: 7086, full_id: Selection.PickObjects, name: Selection.PickObjects Method}
+  - {id: 12716, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObjects(Autodesk.Revit.UI.Selection.ObjectType,Autodesk.Revit.UI.Selection.ISelectionFilter,System.String)', name: 'Selection.PickObjects(ObjectType, ISelectionFilter, String)
+      Method'}
+  - {id: 13204, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObjects(Autodesk.Revit.UI.Selection.ObjectType,System.String)', name: 'Selection.PickObjects(ObjectType, String) Method'}
+  - {id: 25669, full_id: 'M:Autodesk.Revit.UI.Selection.Selection.PickObjects(Autodesk.Revit.UI.Selection.ObjectType)', name: Selection.PickObjects(ObjectType) Method}
+  verified: true
+  verify_note: 11 DB rows for 2 member(s)
+  note: 'area: selection/UI'
+- id: v2-T06
+  group: T
+  query: find which category an element belongs to
+  gold_members: [Element.Category]
+  gold:
+  - {id: 24075, full_id: Element.Category, name: Element.Category Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: categories'
+- id: v2-T07
+  group: T
+  query: get the transform of a linked model
+  gold_members: [Instance.GetTotalTransform, Instance.GetTransform]
+  gold:
+  - {id: 8399, full_id: Instance.GetTotalTransform, name: Instance.GetTotalTransform Method}
+  - {id: 21150, full_id: Instance.GetTransform, name: Instance.GetTransform Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: links (RevitLinkInstance inherits Instance)'
+- id: v2-T08
+  group: T
+  query: duplicate a view including its annotations
+  gold_members: [View.Duplicate]
+  gold:
+  - {id: 21072, full_id: View.Duplicate, name: View.Duplicate Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'area: views'
+- id: v2-T09
+  group: T
+  query: hide some elements in the current view
+  gold_members: [View.HideElements, View.HideElementsTemporary]
+  gold:
+  - {id: 748, full_id: View.HideElements, name: View.HideElements Method}
+  - {id: 15182, full_id: View.HideElementsTemporary, name: View.HideElementsTemporary Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: views'
+- id: v2-T10
+  group: T
+  query: show an element as halftone in a view
+  gold_members: [OverrideGraphicSettings.SetHalftone, View.SetElementOverrides]
+  gold:
+  - {id: 1045, full_id: OverrideGraphicSettings.SetHalftone, name: OverrideGraphicSettings.SetHalftone Method}
+  - {id: 15143, full_id: View.SetElementOverrides, name: View.SetElementOverrides Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: view graphics'
+- id: v2-T11
+  group: T
+  query: get the materials used by an element
+  gold_members: [Element.GetMaterialIds, Element.GetMaterialArea, Element.GetMaterialVolume]
+  gold:
+  - {id: 4923, full_id: Element.GetMaterialIds, name: Element.GetMaterialIds Method}
+  - {id: 11149, full_id: Element.GetMaterialArea, name: Element.GetMaterialArea Method}
+  - {id: 11038, full_id: Element.GetMaterialVolume, name: Element.GetMaterialVolume Method}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: 'area: materials'
+- id: v2-T12
+  group: T
+  query: find the nearest element hit by a ray from a point
+  gold_members: [ReferenceIntersector.FindNearest, ReferenceIntersector Class]
+  gold:
+  - {id: 24967, full_id: ReferenceIntersector.FindNearest, name: ReferenceIntersector.FindNearest Method}
+  - {id: 23321, full_id: ReferenceIntersector, name: ReferenceIntersector Class}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: 'area: geometry/raycast'
+- id: v2-T13
+  group: T
+  query: load a family from an rfa file
+  gold_members: [Document.LoadFamily, Document.LoadFamilySymbol]
+  gold:
+  - {id: 4643, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamily(Autodesk.Revit.DB.Document,Autodesk.Revit.DB.IFamilyLoadOptions)', name: 'Document.LoadFamily(Document, IFamilyLoadOptions) Method'}
+  - {id: 4718, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamily(Autodesk.Revit.DB.Document)', name: Document.LoadFamily(Document) Method}
+  - {id: 12653, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamily(System.String,Autodesk.Revit.DB.Family@)', name: 'Document.LoadFamily(String, Family) Method'}
+  - {id: 13256, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamily(System.String)', name: Document.LoadFamily(String) Method}
+  - {id: 20447, full_id: Document.LoadFamily, name: Document.LoadFamily Method}
+  - {id: 26298, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamily(System.String,Autodesk.Revit.DB.IFamilyLoadOptions,Autodesk.Revit.DB.Family@)', name: 'Document.LoadFamily(String, IFamilyLoadOptions, Family) Method'}
+  - {id: 16994, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamilySymbol(System.String,System.String)', name: 'Document.LoadFamilySymbol(String, String) Method'}
+  - {id: 17896, full_id: Document.LoadFamilySymbol, name: Document.LoadFamilySymbol Method}
+  - {id: 23311, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamilySymbol(System.String,System.String,Autodesk.Revit.DB.FamilySymbol@)', name: 'Document.LoadFamilySymbol(String, String, FamilySymbol) Method'}
+  - {id: 27300, full_id: 'M:Autodesk.Revit.DB.Document.LoadFamilySymbol(System.String,System.String,Autodesk.Revit.DB.IFamilyLoadOptions,Autodesk.Revit.DB.FamilySymbol@)', name: 'Document.LoadFamilySymbol(String, String, IFamilyLoadOptions, FamilySymbol)
+      Method'}
+  verified: true
+  verify_note: 10 DB rows for 2 member(s)
+  note: 'area: families'
+- id: v2-T14
+  group: T
+  query: add a column to a schedule
+  gold_members: [ScheduleDefinition.AddField, ScheduleDefinition.InsertField]
+  gold:
+  - {id: 3387, full_id: ScheduleDefinition.AddField, name: ScheduleDefinition.AddField Method}
+  - {id: 20920, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.AddField(Autodesk.Revit.DB.SchedulableField)', name: ScheduleDefinition.AddField(SchedulableField) Method}
+  - {id: 21121, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.AddField(Autodesk.Revit.DB.ScheduleFieldType,Autodesk.Revit.DB.ElementId)', name: 'ScheduleDefinition.AddField(ScheduleFieldType, ElementId) Method'}
+  - {id: 24017, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.AddField(Autodesk.Revit.DB.ScheduleFieldType)', name: ScheduleDefinition.AddField(ScheduleFieldType) Method}
+  - {id: 3877, full_id: ScheduleDefinition.InsertField, name: ScheduleDefinition.InsertField Method}
+  - {id: 6824, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.InsertField(Autodesk.Revit.DB.ScheduleFieldType,System.Int32)', name: 'ScheduleDefinition.InsertField(ScheduleFieldType, Int32) Method'}
+  - {id: 8015, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.InsertField(Autodesk.Revit.DB.ScheduleFieldType,Autodesk.Revit.DB.ElementId,System.Int32)', name: 'ScheduleDefinition.InsertField(ScheduleFieldType, ElementId, Int32) Method'}
+  - {id: 25042, full_id: 'M:Autodesk.Revit.DB.ScheduleDefinition.InsertField(Autodesk.Revit.DB.SchedulableField,System.Int32)', name: 'ScheduleDefinition.InsertField(SchedulableField, Int32) Method'}
+  verified: true
+  verify_note: 8 DB rows for 2 member(s)
+  note: 'area: schedules (vocabulary gap: column vs field)'
+- id: v2-T15
+  group: T
+  query: which room is a piece of furniture in
+  gold_members: [FamilyInstance.Room, Document.GetRoomAtPoint, Room.IsPointInRoom]
+  gold:
+  - {id: 7925, full_id: FamilyInstance.Room, name: FamilyInstance.Room Property}
+  - {id: 10700, full_id: 'P:Autodesk.Revit.DB.FamilyInstance.Room', name: FamilyInstance.Room Property}
+  - {id: 17700, full_id: 'P:Autodesk.Revit.DB.FamilyInstance.Room(Autodesk.Revit.DB.Phase)', name: FamilyInstance.Room(Phase) Property}
+  - {id: 7026, full_id: Document.GetRoomAtPoint, name: Document.GetRoomAtPoint Method}
+  - {id: 19056, full_id: 'M:Autodesk.Revit.DB.Document.GetRoomAtPoint(Autodesk.Revit.DB.XYZ)', name: Document.GetRoomAtPoint(XYZ) Method}
+  - {id: 19735, full_id: 'M:Autodesk.Revit.DB.Document.GetRoomAtPoint(Autodesk.Revit.DB.XYZ,Autodesk.Revit.DB.Phase)', name: 'Document.GetRoomAtPoint(XYZ, Phase) Method'}
+  - {id: 2544, full_id: Room.IsPointInRoom, name: Room.IsPointInRoom Method}
+  verified: true
+  verify_note: 7 DB rows for 3 member(s)
+  note: 'area: rooms'
+- id: v2-F01
+  group: F
+  query: Definition ParameterType
+  gold_members: [Definition.GetDataType, SpecTypeId Class]
+  gold:
+  - {id: 8403, full_id: Definition.GetDataType, name: Definition.GetDataType Method}
+  - {id: 3283, full_id: SpecTypeId, name: SpecTypeId Class}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: removed API (ParameterType, not in 2026 DB); replacement Definition.GetDataType / SpecTypeId
+- id: v2-F02
+  group: F
+  query: BuiltInParameterGroup PG_GEOMETRY
+  gold_members: [GroupTypeId.Geometry, GroupTypeId Class, Definition.GetGroupTypeId]
+  gold:
+  - {id: 6146, full_id: GroupTypeId.Geometry, name: GroupTypeId.Geometry Property}
+  - {id: 12785, full_id: GroupTypeId, name: GroupTypeId Class}
+  - {id: 20853, full_id: Definition.GetGroupTypeId, name: Definition.GetGroupTypeId Method}
+  verified: true
+  verify_note: 3 DB rows for 3 member(s)
+  note: removed API (BuiltInParameterGroup, not in 2026 DB); replacement GroupTypeId
+- id: v2-F03
+  group: F
+  query: Material GetRenderAppearance
+  gold_members: [Material.AppearanceAssetId, AppearanceAssetElement.GetRenderingAsset]
+  gold:
+  - {id: 9647, full_id: Material.AppearanceAssetId, name: Material.AppearanceAssetId Property}
+  - {id: 26107, full_id: AppearanceAssetElement.GetRenderingAsset, name: AppearanceAssetElement.GetRenderingAsset Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: old API (not in 2026 DB); replacement AppearanceAssetId / AppearanceAssetElement
+- id: v2-F04
+  group: F
+  query: ViewSheet AddView
+  gold_members: [Viewport.Create, Viewport.CanAddViewToSheet]
+  gold:
+  - {id: 8838, full_id: Viewport.Create, name: Viewport.Create Method}
+  - {id: 25115, full_id: Viewport.CanAddViewToSheet, name: Viewport.CanAddViewToSheet Method}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: old API ViewSheet.AddView (not in 2026 DB); replacement Viewport.Create
+- id: v2-F05
+  group: F
+  query: Document NewViewSheet
+  gold_members: [ViewSheet.Create]
+  gold:
+  - {id: 8865, full_id: ViewSheet.Create, name: ViewSheet.Create Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: old API Document.NewViewSheet (not in 2026 DB); replacement ViewSheet.Create
+- id: v2-F06
+  group: F
+  query: Application Create NewLineBound
+  gold_members: [Line.CreateBound]
+  gold:
+  - {id: 14086, full_id: Line.CreateBound, name: Line.CreateBound Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: old API Creation.Application.NewLineBound (not in 2026 DB); replacement Line.CreateBound
+- id: v2-F07
+  group: F
+  query: Wall Level
+  gold_members: [Element.LevelId]
+  gold:
+  - {id: 15319, full_id: Element.LevelId, name: Element.LevelId Property}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: 'CS1061: Wall has no Level (old Element.Level removed); replacement Element.LevelId'
+- id: v2-F08
+  group: F
+  query: View SetVisibility Category
+  gold_members: [View.SetCategoryHidden]
+  gold:
+  - {id: 574, full_id: View.SetCategoryHidden, name: View.SetCategoryHidden Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: old API View.SetVisibility(Category, bool) (not in 2026 DB); replacement View.SetCategoryHidden
+- id: v2-F09
+  group: F
+  query: Category Id IntegerValue BuiltInCategory
+  gold_members: [Category.BuiltInCategory, ElementId.Value]
+  gold:
+  - {id: 6292, full_id: Category.BuiltInCategory, name: Category.BuiltInCategory Property}
+  - {id: 27391, full_id: ElementId.Value, name: ElementId.Value Property}
+  verified: true
+  verify_note: 2 DB rows for 2 member(s)
+  note: obsolete idiom (BuiltInCategory)category.Id.IntegerValue; replacement Category.BuiltInCategory
+- id: v2-F10
+  group: F
+  query: Room Boundary
+  gold_members: [SpatialElement.GetBoundarySegments]
+  gold:
+  - {id: 16013, full_id: SpatialElement.GetBoundarySegments, name: SpatialElement.GetBoundarySegments Method}
+  verified: true
+  verify_note: 1 DB rows for 1 member(s)
+  note: old API Room.Boundary (not in 2026 DB); replacement SpatialElement.GetBoundarySegments
+- id: v2-X01
+  group: X
+  query: TagByExample CreateTagByExample
+  absent:
+    terms: [TagByExample]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["TagByExample"]})'
+  note: 'Revit 2027 only: T:Autodesk.Revit.DB.TagByExample in 2027 RevitAPI.xml, not in 2026.4 RevitAPI.xml'
+- id: v2-X02
+  group: X
+  query: EmbodiedCarbonAsset CarbonCoefficient
+  absent:
+    terms: [EmbodiedCarbon, CarbonCoefficient]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["EmbodiedCarbon", "CarbonCoefficient"]})'
+  note: 'Revit 2027 only: T:Autodesk.Revit.DB.EmbodiedCarbonAsset in 2027 RevitAPI.xml, not in 2026.4 RevitAPI.xml'
+- id: v2-X03
+  group: X
+  query: SizingCalculator CalculateSizeByFriction
+  absent:
+    terms: [SizingCalculator, CalculateSizeByFriction]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["SizingCalculator", "CalculateSizeByFriction"]})'
+  note: 'Revit 2027 only: T:Autodesk.Revit.DB.Analysis.SizingCalculator in 2027 RevitAPI.xml, not in 2026.4 RevitAPI.xml'
+- id: v2-X04
+  group: X
+  query: USDExportOptions
+  absent:
+    terms: [USDExportOptions]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["USDExportOptions"]})'
+  note: 'Revit 2027 only: T:Autodesk.Revit.DB.USDExportOptions in 2027 RevitAPI.xml, not in 2026.4 RevitAPI.xml'
+- id: v2-X05
+  group: X
+  query: Document.FilteredElementCollector()
+  absent:
+    names: [Document.FilteredElementCollector]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["Document.FilteredElementCollector"]})'
+  note: 'non-existent member: class name used as a member; nearest real API new FilteredElementCollector(doc)'
+- id: v2-X06
+  group: X
+  query: FamilyInstance.FamilySymbol property
+  absent:
+    names: [FamilyInstance.FamilySymbol]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["FamilyInstance.FamilySymbol"]})'
+  note: 'non-existent member: class name used as a member; nearest real API FamilyInstance.Symbol'
+- id: v2-X07
+  group: X
+  query: UIDocument.GetElement
+  absent:
+    names: [UIDocument.GetElement]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["UIDocument.GetElement"]})'
+  note: 'non-existent member: member of another class (Document.GetElement) attached to UIDocument'
+- id: v2-X08
+  group: X
+  query: Parameter.LookupParameter
+  absent:
+    names: [Parameter.LookupParameter]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["Parameter.LookupParameter"]})'
+  note: 'non-existent member: member of another class (Element.LookupParameter) attached to Parameter'
+- id: v2-X09
+  group: X
+  query: Wall.Height property
+  absent:
+    names: [Wall.Height]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["Wall.Height"]})'
+  note: non-existent member; wall height is a parameter (BuiltInParameter.WALL_USER_HEIGHT_PARAM), not a property
+- id: v2-X10
+  group: X
+  query: ViewSchedule.ExportToExcel
+  absent:
+    names: [ViewSchedule.ExportToExcel]
+    terms: [ExportToExcel]
+  verified: true
+  verify_note: 'absent from DB (checked: {"names": ["ViewSchedule.ExportToExcel"], "terms": ["ExportToExcel"]})'
+  note: non-existent member; nearest real API ViewSchedule.Export (delimited text)
+- id: v2-X11
+  group: X
+  query: pandas merge two DataFrames on a key column
+  absent:
+    terms: [DataFrame]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["DataFrame"]})'
+  note: 'not Revit. "pandas" itself is not used as an absence term: it is a substring of ArrayGroupAndAssociate'
+- id: v2-X12
+  group: X
+  query: Kubernetes pod stuck in CrashLoopBackOff
+  absent:
+    terms: [Kubernetes, CrashLoopBackOff]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["Kubernetes", "CrashLoopBackOff"]})'
+  note: not Revit
+- id: v2-X13
+  group: X
+  query: CSS flexbox center a div vertically
+  absent:
+    terms: [flexbox]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["flexbox"]})'
+  note: not Revit
+- id: v2-X14
+  group: X
+  query: AutoCAD .NET BlockTableRecord iterate entities in model space
+  absent:
+    terms: [BlockTableRecord]
+    name_terms: [AutoCAD]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["BlockTableRecord"], "name_terms": ["AutoCAD"]})'
+  note: not Revit (AutoCAD .NET API, near-domain). "AutoCAD" occurs in prose of 11 rows (DWG import), so it is checked in name/full_id only
+- id: v2-X15
+  group: X
+  query: how to use the spacebar to rotate a family before placing it
+  absent:
+    terms: [spacebar, space bar]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["spacebar", "space bar"]})'
+  note: not the API (UI question)
+- id: v2-X16
+  group: X
+  query: how to move the Properties palette to a second monitor
+  absent:
+    terms: [second monitor]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["second monitor"]})'
+  note: not the API (UI question)
+- id: v2-X17
+  group: X
+  query: how to sign in to my Autodesk account to activate the Revit license
+  absent:
+    name_terms: [license, signin, sign in]
+  verified: true
+  verify_note: 'absent from DB (checked: {"name_terms": ["license", "signin", "sign in"]})'
+  note: not the API (UI/licensing question). "license" occurs in prose of 9 rows, so name/full_id only; nearest real API Application.IsLoggedIn (read-only)
+- id: v2-X18
+  group: X
+  query: Trasaction Comit
+  absent:
+    terms: [Trasaction, Comit]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["Trasaction", "Comit"]})'
+  note: misspelling (Transaction Commit)
+- id: v2-X19
+  group: X
+  query: ReferenceIntersecter FindNearst
+  absent:
+    terms: [ReferenceIntersecter, FindNearst]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["ReferenceIntersecter", "FindNearst"]})'
+  note: misspelling (ReferenceIntersector FindNearest)
+- id: v2-X20
+  group: X
+  query: Selction PickObjet
+  absent:
+    terms: [Selction, PickObjet]
+  verified: true
+  verify_note: 'absent from DB (checked: {"terms": ["Selction", "PickObjet"]})'
+  note: misspelling (Selection PickObject)
