@@ -110,13 +110,30 @@ def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
     api_db, sdk_db = tiny_dbs
     r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
     text = server.search_api(r, "Wall.Create", 5)
-    # First line names the reranker (none without a key), then the entries.
-    assert text.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10))
+    # First line names the reranker (none without a key) and the data set, then the entries.
+    assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10))
     assert "Environment notes" not in text  # an API query gets no environment notes
     text = server.search_examples(r, "wall", 2)
     assert "Project: CreateWall" in text
     assert server.search_api(r, "qqqq", 5).startswith("No API entries found")
 
+
+
+def test_the_first_line_names_the_data_set_of_the_retriever(tiny_dbs, monkeypatch, tmp_path):
+    """The data set version on the Rerank line is the retriever's revit_version (config)."""
+    from revit_api_docs.config import load_config
+    from revit_api_docs.retriever import RAGRetriever
+
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    api_db, sdk_db = tiny_dbs
+    config = load_config()
+    config["revit_version"] = "2027"
+    r = RAGRetriever(config, str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    assert r.revit_version == "2027"
+    first = server.search_api(r, "Wall.Create", 3).splitlines()[0]
+    assert first == "Rerank: none; data set: Revit 2027"
+    assert first.startswith("Rerank: ")
 
 # -- CLI subcommands --------------------------------------------------------
 
@@ -132,7 +149,7 @@ def test_search_stderr_holds_only_the_warnings_that_matter(tiny_data_dir, no_key
     env = dict(no_key_env, REVIT_API_DOCS_DATA_DIR=str(tiny_data_dir))
     out = _cli(["search", "Wall.Create", "--top-k", "3"], env)
     assert out.returncode == 0, out.stderr
-    assert out.stdout.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10))
+    assert out.stdout.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10))
     lines = out.stderr.splitlines()
     # The two data warnings are the fixture's: its SQLite files are not the
     # release sizes, which ensure_data reports for any hand-copied tree.
@@ -192,7 +209,7 @@ async def test_stdio_round_trip_with_keyword_only_data(tiny_data_dir, no_key_env
                 if "### " in text:
                     break
                 await asyncio.sleep(0.2)
-            assert text.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10))
+            assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10))
 
             res = await session.call_tool("get_code_examples", {"query": "wall"})
             assert "Project: CreateWall" in res.content[0].text
@@ -313,7 +330,7 @@ async def test_http_round_trip_with_keyword_only_data(tiny_data_dir, no_key_env,
                             if "### " in text:
                                 break
                             await asyncio.sleep(0.2)
-                        assert text.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10))
+                        assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10))
         finally:
             proc.terminate()
             proc.wait(timeout=15)

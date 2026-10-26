@@ -84,21 +84,23 @@ Two tools, both read-only:
   and remarks. Query with an API name (`Wall.Create`,
   `FilteredElementCollector OfCategory`) or a short task (`create floor from
   boundary`). The first line names the reranker that ordered the entries
-  (`Rerank: jev`, `cohere` or `none`). Development-environment questions
-  (`target framework for Revit 2027 add-in`) also get up to five curated
-  environment notes (framework, SDK, manifest, reference packages per Revit
-  release, each with its source); these ship with the package and work before
-  the data set is installed and without any key.
+  (`jev`, `cohere` or `none`) and the data set they come from, for example
+  `Rerank: none; data set: Revit 2026`; after an abstention line it is the
+  second line. Development-environment questions (`target framework for
+  Revit 2027 add-in`) also get up to five curated environment notes
+  (framework, SDK, manifest, reference packages per Revit release, each with
+  its source); these ship with the package and work before the data set is
+  installed and without any key.
 - `get_code_examples(query, top_k=3)` — C# from the SDK samples that use the
   matching APIs, with the project name and the APIs each sample touches.
 
 Without any API key the server answers from keyword search over the SQLite
 reference: BM25 over a full-text index of entry names, IDs, summaries and
 signatures, where identifiers also match by their camel-case parts, so a
-misspelt or unknown name still gets candidates. The index is built next to
-the data set on first use (under a second). With an embedding key it adds
-semantic search over the vector store, and with a Cohere key it reranks the
-merged candidates; with a TypeSafe key it can rerank with Jev instead, which
+misspelt or unknown name still gets candidates. The index (11.8 MB) is built
+next to the data set on first use (under a second). With an embedding key it
+adds semantic search over the vector store, and with a Cohere key it reranks
+the merged candidates; with a TypeSafe key it can rerank with Jev instead, which
 returns a calibrated relevance per entry. With a threshold set and no entry
 reaching it, the output starts with an abstention line and then lists the
 candidates with their relevance, for reference. See Configure.

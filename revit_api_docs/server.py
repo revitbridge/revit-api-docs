@@ -51,11 +51,13 @@ before calling a tool.
   in the API reference. Ask with API names when you have them
   ("Wall.Create", "FilteredElementCollector OfCategory") or with a short task
   description ("create floor from boundary"). Results carry the signature,
-  parameters and remarks; trust them over memory. The first line names the
-  reranker. When it says no entry scored high enough, either the member is
-  absent from this version or the data set has it under a different name or
-  wording: check the name and the Revit version, or rephrase, instead of
-  guessing. Questions about the development environment ("target framework
+  parameters and remarks; trust them over memory. The first line (the second
+  after an abstention line) names the reranker and the data set ("Rerank:
+  none; data set: Revit 2026"); cite that version with what you take from the
+  results. When the output says no entry scored high enough, either the
+  member is absent from this version or the data set has it under a different
+  name or wording: check the name and the Revit version, or rephrase, instead
+  of guessing. Questions about the development environment ("target framework
   for Revit 2027 add-in") also get curated environment notes with sources.
 - get_code_examples(query, top_k): real C# from the Revit SDK samples that use
   the APIs in question. Read one before writing code for an unfamiliar API.
@@ -185,18 +187,27 @@ def abstention_line(revit_version: str, reason: str) -> str:
             "or rephrase.")
 
 
-def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
+def rerank_line(results, revit_version: str) -> str:
+    """The `Rerank:` line: the reranker that ran and the data set the entries come from.
+
+    `Rerank: <provider>[ (unavailable: ...)]; data set: Revit <version>` - the
+    first output line, or the second after an abstention line.
+    """
     from revit_api_docs.retriever import rerank_label
 
+    return f"Rerank: {rerank_label(results)}; data set: Revit {revit_version}"
+
+
+def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
     results = retriever.search(query, api_top_k=top_k, code_top_k=0, rewrite=False, rerank=True)
     ctx = retriever.build_context(results)
     api_context = ctx.get("api_context")
     if not api_context:
         return _with_environment_notes(f"No API entries found for {query!r}.", query)
-    head = [f"Rerank: {rerank_label(results)}"]
+    head = [rerank_line(results, retriever.revit_version)]
     if results.abstained:
         head = [abstention_line(retriever.revit_version, results.abstain_reason),
-                f"Rerank: {rerank_label(results)}. Low-relevance candidates, for reference only:"]
+                f"{head[0]}. Low-relevance candidates, for reference only:"]
     return _with_environment_notes("\n".join(head) + "\n\n" + api_context, query)
 
 
@@ -214,9 +225,11 @@ async def search_revit_api(query: str, top_k: int = 10) -> str:
     enums). Returns each match with its signature, parameters and remarks.
     Query in English with an API name ("Wall.Create") or a short task
     ("rotate element around axis"); the reference is English only, so rewrite
-    other languages into English API keywords first. The first line names the
-    reranker; if it says no entry scored high enough, the member is either
-    absent from this version or listed under a different name or wording.
+    other languages into English API keywords first. The first line (the
+    second after an abstention line) names the reranker and the data set
+    ("Rerank: none; data set: Revit 2026"); cite that version. If the output
+    says no entry scored high enough, the member is either absent from this
+    version or listed under a different name or wording.
     Development-environment questions ("target framework for Revit 2027
     add-in") also get curated environment notes. top_k: 1-50, default 10."""
     if not query or not query.strip():

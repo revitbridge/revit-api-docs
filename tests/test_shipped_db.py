@@ -61,12 +61,12 @@ def test_misspelt_identifier_still_gets_candidates(shipped):
     search_revit_api lists candidates (for a reranker to judge) instead of
     "No API entries found"."""
     text = server.search_api(shipped, "FiltredElementColector", 10)
-    assert text.startswith("Rerank: none" + chr(10) * 2 + "### "), text[:200]
+    assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### "), text[:200]
 
 
 def test_wall_create_stays_first_through_the_tool(shipped):
     text = server.search_api(shipped, "Wall.Create", 10)
-    assert text.startswith("Rerank: none" + chr(10) * 2 + "### Wall.Create" + chr(10)), text[:200]
+    assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10)), text[:200]
 
 
 def test_keyword_index_sits_next_to_the_shipped_db(shipped, shipped_dbs):
