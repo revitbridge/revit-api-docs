@@ -17,11 +17,10 @@ All notable changes to this project are documented here. The format follows
 - `search_revit_api` output starts with the reranker that ran
   (`Rerank: jev | cohere | none`, plus `(unavailable: jev)` after a fallback);
   Jev-ranked entries carry `Relevance: 0.00-1.00`.
-- Abstention: with Jev and `REVIT_API_DOCS_MIN_RELEVANCE`, entries below the
-  threshold are dropped and, when none reaches it, the output starts with
-  "No entry in the Revit 2026 data set scored high enough for this query (best
-  relevance x < y)" followed by the low-scoring candidates. Other providers
-  never abstain.
+- Abstention: with Jev and `REVIT_API_DOCS_MIN_RELEVANCE`, when no entry
+  reaches the threshold the output starts with "No entry in the Revit 2026
+  data set scored high enough for this query (best relevance x < y)" followed
+  by the low-scoring candidates. Other providers never abstain.
 - Streamable HTTP transport: `revit-api-docs serve --transport http --host
   127.0.0.1 --port 8765` (endpoint `/mcp`); stdio remains the default. A
   non-loopback `--host` logs a warning: there is no built-in authentication.
@@ -37,14 +36,38 @@ All notable changes to this project are documented here. The format follows
   shipped data set when it is installed: gold in the BM25 top 30 for at least
   44 of 50 (measured 45), hit@5 at least 36 of 50 (measured 38), and a
   non-empty candidate list for every unanswerable query. No network.
+- A second regression fixture, `tests/fixtures/retrieval_queries_v2.yaml`: 60
+  more English queries (40 answerable, 20 not, 9 of those next to a real API,
+  such as a class name used as a member or a misspelling), none shared with
+  the first set. `tests/test_bm25_recall.py` runs both sets;
+  for this one: gold in the BM25 top 30 for at least 33 of 40 (measured 34),
+  hit@5 at least 25 of 40 (measured 27), and candidates for at least 19 of the
+  20 unanswerable queries (measured 19).
 - `close()` on the rerank providers releases their HTTP client.
 - README: when to turn on Jev (`REVIT_API_DOCS_RERANK_PROVIDER=jev` with a
   TypeSafe key; nDCG@5 0.675 -> 0.871 on the test queries, about $0.23 per
-  1,000 queries), the suggested `REVIT_API_DOCS_MIN_RELEVANCE` of 0.15 (still
-  being validated) and why not 0.5. Defaults are unchanged.
+  1,000 queries), what a `REVIT_API_DOCS_MIN_RELEVANCE` of 0.15 filters and
+  what it does not, and why not 0.5. Defaults are unchanged.
 
 ### Changed
 
+- `REVIT_API_DOCS_MIN_RELEVANCE` only decides whether to abstain. When at
+  least one entry reaches it, the entries below it are no longer dropped:
+  every reranked entry comes back (up to `top_k`) with its `Relevance`, so a
+  correct entry scored just under the threshold stays in the list. Abstention
+  itself, and the output format, are unchanged.
+- README and the `jev-rerank-provider` environment note describe the
+  threshold as a relevance filter: at 0.15 it filters out clearly unrelated
+  queries (not about Revit, types the data set does not have) and abstains
+  on about 2.5% of the queries that have an answer, but it cannot spot a
+  misspelt or misplaced member name, for which the closest real API usually
+  comes first and a compile check decides. "No entry scored high enough" is
+  described as "nothing relevant, or worded differently", not as "the member
+  does not exist"; the README no longer says the value is being validated.
+- The rerank HTTP clients (Jev and Cohere) keep idle connections open for 5
+  minutes (`keepalive_expiry=300`; httpx closes them after 5 s), so a query
+  after a pause can reuse the connection instead of setting up TLS again.
+  The other connection limits stay at httpx's defaults.
 - Keyword search over the API reference ranks with BM25 on an SQLite FTS5
   index instead of LIKE substring scoring. The index is a separate file,
   `sqlite/revit_api_fts.db` next to `revit_api.db` (which is never written),

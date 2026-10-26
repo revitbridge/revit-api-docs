@@ -126,7 +126,7 @@ All settings are environment variables; there is no config file to edit.
 | `REVIT_API_DOCS_RERANK_PROVIDER` | `cohere` | `cohere`, `jev` or `none`. With `jev`, a failed or unconfigured Jev call falls back to Cohere when `COHERE_API_KEY` is set, otherwise to no reranking; the first output line says which one ran |
 | `TYPESAFE_API_KEY` | *(unset)* | Key for TypeSafe System One (Jev), used when the provider is `jev`. At most 30 candidates per request, 2 requests in flight, 2 retries, 20 s timeout |
 | `REVIT_API_DOCS_JEV_MODEL` | `jev-latest` | Jev model or alias; pin a version such as `jev-1.14.0` for reproducible results |
-| `REVIT_API_DOCS_MIN_RELEVANCE` | *(unset)* | Probability 0-1 (`retrieval.api.min_relevance`). Only honoured while Jev ranks the results: entries below it are dropped, and when none reaches it `search_revit_api` starts with "No entry in the Revit 2026 data set scored high enough for this query", notes that the member may be absent from this version or listed under a different name or wording, and lists the low-scoring candidates for reference. No effect with Cohere or without reranking. See "Reranking with Jev" below |
+| `REVIT_API_DOCS_MIN_RELEVANCE` | *(unset)* | Probability 0-1 (`retrieval.api.min_relevance`). Only honoured while Jev ranks the results, and it only decides whether to abstain: no entry is dropped, every result keeps its `Relevance` line. When no entry reaches it, `search_revit_api` starts with "No entry in the Revit 2026 data set scored high enough for this query", notes that the member may be absent from this version or listed under a different name or wording, and lists the low-scoring candidates for reference. No effect with Cohere or without reranking. See "Reranking with Jev" below |
 | `REVIT_API_DOCS_RELEASE_URL` | this repository's `v1.0-data` release | Mirror for the data files; the SHA-256 checks still apply |
 | `HTTPS_PROXY` / `HTTP_PROXY` | *(unset)* | Proxy for the embedding and rerank calls |
 
@@ -138,10 +138,14 @@ provider stays `cohere`). On 60 English test queries (50 with a known answer)
 over the keyword (BM25) candidates, with no embedding key, Jev raised nDCG@5
 from 0.675 to 0.871 and never turned a correct top-5 answer into a miss.
 Input tokens cost about $0.23 per 1,000 queries.
-`REVIT_API_DOCS_MIN_RELEVANCE` stays unset by default; the suggested value is
-0.15, still being validated on a new query set. **Do not use 0.5**: it
-abstained on 14% of the queries that have an answer. What TypeSafe keeps:
-see the `jev-data-handling` note (`uvx revit-api-docs environment typesafe`).
+`REVIT_API_DOCS_MIN_RELEVANCE` stays unset by default. Set to 0.15 it filters
+out clearly unrelated queries (questions that are not about Revit, types this
+data set does not have), abstaining on about 2.5% of the queries that do have
+an answer. It cannot spot a misspelt or misplaced member name: such a query
+usually gets the closest real API as the first result, to be confirmed with a
+compile check. **Do not use 0.5**: it abstained on 14% of the queries that
+have an answer. What TypeSafe keeps: see the `jev-data-handling` note
+(`uvx revit-api-docs environment typesafe`).
 
 Privacy: with an embedding, Cohere or TypeSafe key the query text and the
 candidate API entries (public documentation) are sent to that provider. Keep
