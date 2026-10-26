@@ -95,10 +95,10 @@ Two tools, both read-only:
 Without any API key the server answers from keyword search over the SQLite
 reference: BM25 over a full-text index of entry names, IDs, summaries and
 signatures, where identifiers also match by their camel-case parts, so a
-misspelt or unknown name still gets candidates. The index is built next to
-the data set on first use (under a second). With an embedding key it adds
-semantic search over the vector store, and with a Cohere key it reranks the
-merged candidates; with a TypeSafe key it can rerank with Jev instead, which
+misspelt or unknown name still gets candidates. The index (11.8 MB) is built
+next to the data set on first use (under a second). With an embedding key it
+adds semantic search over the vector store, and with a Cohere key it reranks
+the merged candidates; with a TypeSafe key it can rerank with Jev instead, which
 returns a calibrated relevance per entry. With a threshold set and no entry
 reaching it, the output starts with an abstention line and then lists the
 candidates with their relevance, for reference. See Configure.
