@@ -272,7 +272,10 @@ notes:
       search_revit_api can rerank with TypeSafe Jev (System One, alias
       jev-latest; jev-1.13 and newer): REVIT_API_DOCS_RERANK_PROVIDER=jev plus
       TYPESAFE_API_KEY. Each candidate gets a calibrated 0-1 probability; with
-      REVIT_API_DOCS_MIN_RELEVANCE set the tool says when nothing matched.
+      REVIT_API_DOCS_MIN_RELEVANCE set and every candidate below it, the tool
+      reports that no entry scored high enough: the data set has no relevant
+      entry or words it differently, which is not proof that the member does
+      not exist.
       Context: 64k tokens per request, 32k per question; billed per input token
       ($0.042 per million); rate limits are set per organization (HTTP 429).
       It is a hosted API (no self-hosted option is documented), so queries and

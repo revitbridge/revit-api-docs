@@ -16,6 +16,7 @@ from revit_api_docs import config as cfgmod
 from revit_api_docs import server
 from revit_api_docs.reranker import (
     JEV_URL,
+    KEEPALIVE_EXPIRY,
     JevReranker,
     Reranker,
     RerankError,
@@ -57,6 +58,17 @@ def cohere_transport(scores: list[float], calls: list | None = None, *, status: 
         results = [{"index": i, "relevance_score": scores[i] if i < len(scores) else 0.0} for i in range(n)]
         results.sort(key=lambda r: -r["relevance_score"])
         return httpx.Response(200, json={"results": results[:body["top_n"]]})
+
+    return httpx.MockTransport(handler)
+
+
+def jev_position_transport(scores: list[float]):
+    """MockTransport giving the i-th candidate of the request the score scores[i]."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        answers = {qid: {"type": "noul", "noul": scores[int(qid[1:])]} for qid in body["questions"]}
+        return httpx.Response(200, json={"model": "jev-1.14.0", "answers": answers})
 
     return httpx.MockTransport(handler)
 
@@ -221,6 +233,7 @@ class _CountingClient(httpx.Client):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         _CountingClient.created.append(self)
+        self.init_kwargs = kwargs
         self.closed_by_us = False
 
     def close(self):
@@ -260,6 +273,39 @@ def test_cohere_reuses_one_client_across_calls(cohere_key, counting_client):
     assert len(counting_client) == 1 and len(calls) == 2
     r.close()
     assert counting_client[0].is_closed
+
+
+@pytest.mark.parametrize("provider", ["jev", "cohere"])
+def test_clients_keep_idle_connections_for_five_minutes(jev_key, cohere_key, counting_client, provider):
+    """Both providers build their client with keepalive_expiry=300; every other
+    limit stays at httpx's default, and an injected transport is still the one used."""
+    calls: list = []
+    if provider == "jev":
+        t = jev_transport(lambda d: 0.5, calls)
+        r = jev(t)
+        r.score("q", ["a", "b"])
+    else:
+        t = cohere_transport([0.2, 0.9], calls)
+        r = Reranker(transport=t)
+        r.rerank("q", ["a", "b"], top_n=2, strict=True)
+    assert len(counting_client) == 1 and len(calls) == 1
+    kwargs = counting_client[0].init_kwargs
+    limits = kwargs["limits"]
+    assert limits.keepalive_expiry == 300 == KEEPALIVE_EXPIRY
+    assert (limits.max_connections, limits.max_keepalive_connections) == (100, 20)  # httpx defaults
+    assert kwargs["transport"] is t
+    r.close()
+
+
+@pytest.mark.parametrize("make", [lambda: JevReranker(), lambda: Reranker()], ids=["jev", "cohere"])
+def test_clients_without_injected_transport_get_the_same_limits(counting_client, make):
+    r = make()
+    client = r._http.get()  # built, never used: no request leaves the machine
+    kwargs = client.init_kwargs
+    assert "transport" not in kwargs
+    assert kwargs["limits"].keepalive_expiry == 300
+    assert (kwargs["limits"].max_connections, kwargs["limits"].max_keepalive_connections) == (100, 20)
+    r.close()
 
 
 def test_jev_without_key_never_calls_out():
@@ -446,12 +492,48 @@ def test_abstains_when_every_candidate_is_below_the_threshold(tiny_dbs, tmp_path
     assert r.format_results(res).splitlines()[1] == "abstained: best relevance 0.07 < 0.20"
 
 
-def test_threshold_drops_low_candidates_without_abstaining(tiny_dbs, tmp_path, monkeypatch, jev_key):
+def test_threshold_keeps_low_candidates_with_their_relevance(tiny_dbs, tmp_path, monkeypatch, jev_key):
+    """The threshold only decides abstention: once one candidate reaches it,
+    the ones below it are still returned, each with its relevance."""
     r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.2",
                    chain=[jev(jev_transport(_wall_create_first))])
     res = r.search("wall", api_top_k=5, code_top_k=0, rewrite=False, rerank=True)
-    assert not res.abstained
-    assert [i.full_id for i in res.api_items] == ["Wall.Create"]
+    assert not res.abstained and res.abstain_reason == ""
+    assert res.api_items[0].full_id == "Wall.Create"
+    assert res.api_items[0].relevance == pytest.approx(0.91)
+    below = res.api_items[1:]
+    assert len(below) == 4 and all(i.relevance == pytest.approx(0.12) for i in below)
+
+    lines = server.search_api(r, "wall", 5).splitlines()
+    assert lines[0] == "Rerank: jev" and lines[1] == ""
+    assert lines[2] == "### Wall.Create" and lines[3] == "Relevance: 0.91"
+    assert lines.count("Relevance: 0.12") == 4
+
+
+@pytest.mark.parametrize("scores, abstains", [
+    ([0.9, 0.3, 0.1], False),
+    ([0.3, 0.1], True),
+])
+def test_threshold_decides_abstention_only(tiny_dbs, tmp_path, monkeypatch, jev_key, scores, abstains):
+    """Threshold 0.5: [0.9, 0.3, 0.1] returns all three without abstaining;
+    [0.3, 0.1] abstains and keeps both candidates for reference."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.5",
+                   chain=[jev(jev_position_transport(scores))])
+    keyword = r._keyword_search_api
+    monkeypatch.setattr(r, "_keyword_search_api", lambda q, limit: keyword(q, limit=limit)[:len(scores)])
+
+    res = r.search("wall", api_top_k=5, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "jev" and res.abstained is abstains
+    assert [i.relevance for i in res.api_items] == pytest.approx(scores)
+    assert res.abstain_reason == ("best relevance 0.30 < 0.50" if abstains else "")
+
+    lines = server.search_api(r, "wall", 5).splitlines()
+    assert [ln for ln in lines if ln.startswith("Relevance: ")] == [f"Relevance: {s:.2f}" for s in scores]
+    if abstains:
+        assert lines[0].startswith("No entry in the Revit 2026 data set scored high enough")
+        assert lines[1] == "Rerank: jev. Low-relevance candidates, for reference only:"
+    else:
+        assert lines[0] == "Rerank: jev" and lines[1] == ""
 
 
 def test_no_threshold_never_abstains(tiny_dbs, tmp_path, monkeypatch, jev_key):
