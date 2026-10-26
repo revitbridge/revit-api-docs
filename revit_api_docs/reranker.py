@@ -18,12 +18,14 @@ Providers (config `rerank.provider`, env REVIT_API_DOCS_RERANK_PROVIDER):
 
 Every provider has the same call: `rerank(query, documents, top_n, strict=False)
 -> list[RerankResult]`. Each instance keeps one HTTP client (created on the
-first call, reused afterwards so the TLS setup is paid once); `close()`
-releases it. With strict=False a failure returns the input order
-(the historical Cohere behaviour); with strict=True it raises RerankError so
-the caller can try the next provider. `create_rerank_chain` returns the
-providers to try in order: [jev, cohere] for provider "jev" (Cohere only when
-its key is set), [cohere] for "cohere", [] for "none" or when no key is set.
+first call, reused afterwards so the TLS setup is paid once) whose idle
+connections stay open for 5 minutes (httpx closes them after 5 s by
+default); `close()` releases it. With strict=False a failure returns the
+input order (the historical Cohere behaviour); with strict=True it raises
+RerankError so the caller can try the next provider. `create_rerank_chain`
+returns the providers to try in order: [jev, cohere] for provider "jev"
+(Cohere only when its key is set), [cohere] for "cohere", [] for "none" or
+when no key is set.
 
 Configured in default_config.yaml:
     rerank:
@@ -135,9 +137,18 @@ class _SharedClient:
             client.close()
 
 
+# Idle connections stay open for 5 minutes instead of httpx's 5 seconds, so a
+# query that follows a pause reuses the TLS connection. The connection counts
+# are httpx's defaults, spelled out because httpx.Limits() leaves any count
+# it is not given unlimited.
+KEEPALIVE_EXPIRY = 300.0
+HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                           keepalive_expiry=KEEPALIVE_EXPIRY)
+
+
 def _client_kwargs(timeout: float, proxy: str | None,
                    transport: httpx.BaseTransport | None) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"timeout": timeout}
+    kwargs: dict[str, Any] = {"timeout": timeout, "limits": HTTP_LIMITS}
     if proxy:
         kwargs["proxy"] = proxy
     if transport is not None:

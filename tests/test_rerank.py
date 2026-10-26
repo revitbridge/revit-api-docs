@@ -16,6 +16,7 @@ from revit_api_docs import config as cfgmod
 from revit_api_docs import server
 from revit_api_docs.reranker import (
     JEV_URL,
+    KEEPALIVE_EXPIRY,
     JevReranker,
     Reranker,
     RerankError,
@@ -232,6 +233,7 @@ class _CountingClient(httpx.Client):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         _CountingClient.created.append(self)
+        self.init_kwargs = kwargs
         self.closed_by_us = False
 
     def close(self):
@@ -271,6 +273,39 @@ def test_cohere_reuses_one_client_across_calls(cohere_key, counting_client):
     assert len(counting_client) == 1 and len(calls) == 2
     r.close()
     assert counting_client[0].is_closed
+
+
+@pytest.mark.parametrize("provider", ["jev", "cohere"])
+def test_clients_keep_idle_connections_for_five_minutes(jev_key, cohere_key, counting_client, provider):
+    """Both providers build their client with keepalive_expiry=300; every other
+    limit stays at httpx's default, and an injected transport is still the one used."""
+    calls: list = []
+    if provider == "jev":
+        t = jev_transport(lambda d: 0.5, calls)
+        r = jev(t)
+        r.score("q", ["a", "b"])
+    else:
+        t = cohere_transport([0.2, 0.9], calls)
+        r = Reranker(transport=t)
+        r.rerank("q", ["a", "b"], top_n=2, strict=True)
+    assert len(counting_client) == 1 and len(calls) == 1
+    kwargs = counting_client[0].init_kwargs
+    limits = kwargs["limits"]
+    assert limits.keepalive_expiry == 300 == KEEPALIVE_EXPIRY
+    assert (limits.max_connections, limits.max_keepalive_connections) == (100, 20)  # httpx defaults
+    assert kwargs["transport"] is t
+    r.close()
+
+
+@pytest.mark.parametrize("make", [lambda: JevReranker(), lambda: Reranker()], ids=["jev", "cohere"])
+def test_clients_without_injected_transport_get_the_same_limits(counting_client, make):
+    r = make()
+    client = r._http.get()  # built, never used: no request leaves the machine
+    kwargs = client.init_kwargs
+    assert "transport" not in kwargs
+    assert kwargs["limits"].keepalive_expiry == 300
+    assert (kwargs["limits"].max_connections, kwargs["limits"].max_keepalive_connections) == (100, 20)
+    r.close()
 
 
 def test_jev_without_key_never_calls_out():
