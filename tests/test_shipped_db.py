@@ -4,16 +4,19 @@ The two SQLite files (34 MB) are looked up in REVIT_API_DOCS_DATA_DIR or the
 default data directory. When REVIT_API_DOCS_TEST_DOWNLOAD=1 they are fetched
 from the data release into that directory first (CI does this and caches the
 files); otherwise the module is skipped (see conftest.find_shipped_dbs).
+The vector store test also needs the installed ChromaDB directories (300 MB,
+not fetched by the tests) and is skipped without them.
 """
 from __future__ import annotations
 
 import os
+import sqlite3
 
 import pytest
 
-from revit_api_docs import server
+from revit_api_docs import data, server
 from revit_api_docs.config import load_config
-from revit_api_docs.retriever import RAGRetriever
+from revit_api_docs.retriever import RAGRetriever, check_vector_stores
 
 
 @pytest.fixture(scope="module")
@@ -67,6 +70,37 @@ def test_misspelt_identifier_still_gets_candidates(shipped):
 def test_wall_create_stays_first_through_the_tool(shipped):
     text = server.search_api(shipped, "Wall.Create", 10)
     assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10)), text[:200]
+
+
+def test_shipped_vector_store_is_matched_by_name(shipped_dbs):
+    """v1.0-data: the record ids of the API vector store are not revit_api row
+    ids, the entry names are. The nearest records to the vector of `Wall.Create
+    Method` come back as the rows that carry their names. No embedding call:
+    the query vector is the record's own."""
+    api_db, sdk_db = shipped_dbs
+    p = data.paths(api_db.parent.parent)
+    if not all((d / "chroma.sqlite3").is_file() for d in (p.chromadb_api, p.chromadb_code)):
+        pytest.skip("the shipped vector store is not installed")
+    api, sdk = check_vector_stores(str(api_db), str(sdk_db), str(p.chromadb_api), str(p.chromadb_code))
+    assert (api.status, api.records, api.sampled) == ("misaligned", 28863, 50)
+    assert api.id_matches <= 2 and api.name_matches >= 45, api
+    assert (sdk.status, sdk.records, sdk.id_matches) == ("aligned", 153, 50), sdk
+
+    r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(p.chromadb_api), str(p.chromadb_code))
+    r._open_collections()
+    wall = r._api_collection.get(where={"name": "Wall.Create Method"}, include=["embeddings"])
+    raw = r._api_collection.query(query_embeddings=[list(wall["embeddings"][0])], n_results=10,
+                                  include=["metadatas", "distances"])
+    record_names = [m["name"] for m in raw["metadatas"][0]]
+    items = r._hydrate_api(raw)
+    assert items[0].name == record_names[0] == "Wall.Create Method"
+    assert len(items) >= 8 and all(i.name in record_names for i in items)
+    conn = sqlite3.connect(api_db)
+    try:
+        by_id = conn.execute("SELECT name FROM revit_api WHERE id = ?", (int(raw["ids"][0][0]),)).fetchone()
+    finally:
+        conn.close()
+    assert by_id is None or by_id[0] != "Wall.Create Method"   # what the id lookup returned
 
 
 def test_keyword_index_sits_next_to_the_shipped_db(shipped, shipped_dbs):

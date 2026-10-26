@@ -6,6 +6,62 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Vector hits now come back as the entries they describe and count also
+without a reranker; reranking picks its provider from the keys that are set.
+
+**Upgrading**: with an embedding key the first vector query logs the warning
+`vector_store_misaligned` for the `v1.0-data` release: its record ids do not
+line up with the SQLite rows, and hits are now matched by entry name. Without
+any key nothing changes. Reranker choice: with only `COHERE_API_KEY` set Cohere
+still reranks; with `TYPESAFE_API_KEY` set Jev now reranks without
+`REVIT_API_DOCS_RERANK_PROVIDER=jev` (set the provider to `cohere` to keep
+Cohere).
+
+### Fixed
+
+- Vector search returned unrelated entries. The vector store of the
+  `v1.0-data` release numbers its 28,863 API records independently of the
+  27,596 rows of `revit_api.db` (2 ids name the same entry in both), and hits
+  were looked up by record id. A hit is now matched to the row whose entry
+  name equals the record's `name` metadata (the row with the record's own id
+  when it carries that name; among rows sharing a name the one with the
+  record's `full_id` or `info`, else the lowest id). 27,591 records (95.6%)
+  reach 27,512 rows (99.7%); records without a row are dropped. The SDK sample
+  store's ids match its rows, and matching by project name keeps them. The
+  name map is built on the first vector query and kept in memory.
+- Consistency probe: on the first vector query 50 records of each vector
+  collection are compared with SQLite. When fewer than 90% of the sampled ids
+  name the same entry as the row with that id, the warning
+  `vector_store_misaligned` is logged and hits are matched by name (`v1.0-data`:
+  0/50 ids, 49/50 names). When fewer than 50% of the sampled names are found
+  either, vector search is off for the process and keyword search answers
+  alone. `revit-api-docs download` prints the check for the installed data set.
+- A second retriever in the same process could not open the vector store
+  ("An instance of Chroma already exists ... with different settings"): each
+  ChromaDB client now gets its own `Settings` object.
+
+### Changed
+
+- Hybrid ranking by reciprocal rank fusion: the vector hits and the BM25 hits,
+  `retrieval.api.top_k` (30) of each, are fused with score = sum of
+  1 / (60 + rank), and the best 30 go to the reranker; without a reranker they
+  are cut to `top_k`. On equal scores a keyword hit comes first. Before, the
+  two lists were merged by distances on different scales, so without a
+  reranker vector-only hits never reached the top 5, and up to 60 candidates
+  went to the reranker. Without an embedding key the BM25 order and results
+  are unchanged. On 223 English test queries without reranking: nDCG@5 0.565
+  -> 0.610 overall and 0.365 -> 0.438 on the 113 multi-step task requests,
+  whose answer is among the top 30 for 84% instead of 73% of them.
+- The default rerank provider is `auto`: Jev when `TYPESAFE_API_KEY` is set,
+  otherwise Cohere when `COHERE_API_KEY` is set, otherwise none.
+  `REVIT_API_DOCS_RERANK_PROVIDER` (now `auto`, `jev`, `cohere` or `none`)
+  still wins, and the `Rerank:` line names the provider that ran. README:
+  Jev is the recommended reranker, Cohere optional and the fallback for Jev.
+- Cohere requests time out after 20 s instead of 10 s (the same as Jev); 10 s
+  cut off about 1% of calls.
+- `search_revit_api` and `get_code_examples` are unchanged: names,
+  parameters and the first output line.
+
 ## [0.2.0] - 2026-10-26
 
 Better candidates without any key, and an opt-in relevance check: BM25 keyword

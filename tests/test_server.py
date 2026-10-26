@@ -135,6 +135,43 @@ def test_the_first_line_names_the_data_set_of_the_retriever(tiny_dbs, monkeypatc
     assert first == "Rerank: none; data set: Revit 2027"
     assert first.startswith("Rerank: ")
 
+def test_download_reports_the_vector_store_check(monkeypatch, tmp_path):
+    """`download` prints the consistency probe of both collections; an unusable
+    collection adds that vector search stays off, and a failing check is reported
+    instead of raised."""
+    from revit_api_docs import data, retriever
+
+    def probe(collection, status, ids, names):
+        return retriever.VectorProbe(collection, collection, "name", 100, 50, ids, names, status)
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(retriever, "check_vector_stores", lambda *a: seen.append(a) or [
+        probe("revit_api", "misaligned", 0, 49), probe("revit_sdk", "aligned", 50, 50)])
+    paths = data.paths(tmp_path)
+    lines = server.vector_store_report(paths)
+    assert seen == [(str(paths.api_db), str(paths.sdk_db), str(paths.chromadb_api), str(paths.chromadb_code))]
+    assert lines == [
+        "vector store check: revit_api vectors (100 records) vs SQLite revit_api: misaligned, 0/50 sampled "
+        "record ids name the same entry as the row with that id; 49/50 sampled entry names (name) found, "
+        "so vector hits are matched to rows by name",
+        "vector store check: revit_sdk vectors (100 records) vs SQLite revit_sdk: aligned, 50/50 sampled "
+        "record ids name the same entry as the row with that id"]
+
+    monkeypatch.setattr(retriever, "check_vector_stores", lambda *a: [probe("revit_api", "unusable", 0, 3)])
+    lines = server.vector_store_report(paths)
+    assert lines[0].endswith("0/50 sampled record ids name the same entry as the row with that id and "
+                             "3/50 sampled entry names (name) found; vector search is off")
+    assert lines[1].startswith("vector search stays off for this data set")
+
+    def broken(*a):
+        raise ValueError("no such collection")
+
+    monkeypatch.setattr(retriever, "check_vector_stores", broken)
+    assert server.vector_store_report(paths) == [
+        "vector store check failed (ValueError: no such collection); vector search will be off when it "
+        "fails the same way at query time"]
+
+
 # -- CLI subcommands --------------------------------------------------------
 
 def _cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

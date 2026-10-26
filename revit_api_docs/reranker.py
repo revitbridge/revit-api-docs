@@ -7,13 +7,15 @@ Flow:
     3. The top_n best results come back sorted by relevance score
 
 Providers (config `rerank.provider`, env REVIT_API_DOCS_RERANK_PROVIDER):
-    cohere  Cohere native rerank API (https://api.cohere.com/v2/rerank), key in
-            COHERE_API_KEY. Scores order the candidates; they are not
-            calibrated probabilities.
+    auto    the default: jev when TYPESAFE_API_KEY is set, else cohere when
+            COHERE_API_KEY is set, else none. An explicit provider wins.
     jev     TypeSafe System One (model `jev-latest`), key in TYPESAFE_API_KEY.
             One `noul` question per candidate; the answer is the calibrated
             probability (0-1) that the candidate is what the query looks for,
             which is what lets the retriever abstain (`min_relevance`).
+    cohere  Cohere native rerank API (https://api.cohere.com/v2/rerank), key in
+            COHERE_API_KEY, 20 s timeout. Scores order the candidates; they are
+            not calibrated probabilities.
     none    no reranking.
 
 Every provider has the same call: `rerank(query, documents, top_n, strict=False)
@@ -23,14 +25,14 @@ connections stay open for 5 minutes (httpx closes them after 5 s by
 default); `close()` releases it. With strict=False a failure returns the
 input order (the historical Cohere behaviour); with strict=True it raises
 RerankError so the caller can try the next provider. `create_rerank_chain`
-returns the providers to try in order: [jev, cohere] for provider "jev"
-(Cohere only when its key is set), [cohere] for "cohere", [] for "none" or
-when no key is set.
+returns the providers to try in order for the provider `configured_provider`
+resolves: [jev, cohere] for "jev" (Cohere only when its key is set), [cohere]
+for "cohere", [] for "none" or when no key is set.
 
 Configured in default_config.yaml:
     rerank:
       enabled: true
-      provider: "cohere"
+      provider: "auto"
       models:
         cohere:
           model: "rerank-v3.5"
@@ -60,7 +62,11 @@ _COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
 # TypeSafe System One endpoint (docs.typesafe.ai, API reference "System One")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 
-PROVIDERS = ("cohere", "jev", "none")
+PROVIDERS = ("auto", "cohere", "jev", "none")
+
+# Cohere request timeout. 10 s timed out on 8 of 688 calls in an evaluation
+# run (p95 latency 1.5-2.4 s); 20 s, the same as Jev.
+COHERE_TIMEOUT = 20.0
 
 
 @dataclass
@@ -176,7 +182,7 @@ class Reranker(RerankProvider):
         self._api_key = os.getenv(api_key_env, "")
         self._proxy = proxy
         self._transport = transport
-        self._http = _SharedClient(**_client_kwargs(10.0, proxy, transport))
+        self._http = _SharedClient(**_client_kwargs(COHERE_TIMEOUT, proxy, transport))
 
         if self._api_key:
             _log.info(f"[Reranker] initialized model={self._model}")
@@ -465,12 +471,35 @@ def _proxy_url(config: dict) -> str | None:
     return None
 
 
+def _requested_provider(config: dict) -> str:
+    """rerank.provider as configured (REVIT_API_DOCS_RERANK_PROVIDER overrides it), lower case."""
+    rerank_cfg = config.get("rerank", {}) or {}
+    return str(rerank_cfg.get("provider") or "auto").strip().lower()
+
+
+def _key_set(config: dict, provider: str, default_env: str) -> bool:
+    model_cfg = ((config.get("rerank", {}) or {}).get("models", {}) or {}).get(provider) or {}
+    return bool(model_cfg) and bool(os.getenv(model_cfg.get("api_key_env", default_env), ""))
+
+
 def configured_provider(config: dict) -> str:
-    """The provider the config asks for: cohere | jev | none (unknown -> none)."""
+    """The provider that reranks: jev | cohere | none.
+
+    `auto` resolves by key: jev when TYPESAFE_API_KEY is set, else cohere when
+    COHERE_API_KEY is set, else none. An explicit provider is returned as it
+    is, key or no key (the retriever reports a selected jev without a key as
+    unavailable); an unknown name, or rerank.enabled false, is none.
+    """
     rerank_cfg = config.get("rerank", {}) or {}
     if not rerank_cfg.get("enabled", False):
         return "none"
-    provider = str(rerank_cfg.get("provider") or "cohere").strip().lower()
+    provider = _requested_provider(config)
+    if provider == "auto":
+        if _key_set(config, "jev", "TYPESAFE_API_KEY"):
+            return "jev"
+        if _key_set(config, "cohere", "COHERE_API_KEY"):
+            return "cohere"
+        return "none"
     return provider if provider in PROVIDERS else "none"
 
 
@@ -522,22 +551,30 @@ def _make_jev(config: dict) -> JevReranker | None:
 def create_rerank_chain(config: dict) -> list[RerankProvider]:
     """Providers to try in order; empty when reranking is off or no key is set.
 
-    provider "jev": Jev first, then Cohere when COHERE_API_KEY is set (the
-    fallback for a failed or unconfigured Jev call). provider "cohere":
-    Cohere only. provider "none" or rerank.enabled false: nothing.
+    The provider is the one configured_provider resolves (auto: by key).
+    "jev": Jev first, then Cohere when COHERE_API_KEY is set (the fallback for
+    a failed or unconfigured Jev call). "cohere": Cohere only. "none" or
+    rerank.enabled false: nothing.
     """
     rerank_cfg = config.get("rerank", {}) or {}
     if not rerank_cfg.get("enabled", False):
         _log.info("[create_reranker] rerank disabled in config")
         return []
-    provider = str(rerank_cfg.get("provider") or "cohere").strip().lower()
-    if provider == "none":
-        _log.info("[create_reranker] rerank provider is none")
-        return []
-    if provider not in PROVIDERS:
-        _log.warning(f"[create_reranker] unknown provider={provider!r} "
+    requested = _requested_provider(config)
+    if requested not in PROVIDERS:
+        _log.warning(f"[create_reranker] unknown provider={requested!r} "
                      f"(use one of {', '.join(PROVIDERS)}), rerank will be disabled")
         return []
+    provider = configured_provider(config)
+    if provider == "none":
+        if requested == "auto":
+            _log.warning("[create_reranker] provider auto: env vars TYPESAFE_API_KEY and "
+                         "COHERE_API_KEY not set, rerank will be disabled")
+        else:
+            _log.info("[create_reranker] rerank provider is none")
+        return []
+    if requested == "auto":
+        _log.info(f"[create_reranker] provider auto -> {provider}")
 
     chain: list[RerankProvider] = []
     if provider == "jev":

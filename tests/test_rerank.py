@@ -14,12 +14,15 @@ import pytest
 
 from revit_api_docs import config as cfgmod
 from revit_api_docs import server
+from revit_api_docs import reranker as rerank_mod
 from revit_api_docs.reranker import (
+    COHERE_TIMEOUT,
     JEV_URL,
     KEEPALIVE_EXPIRY,
     JevReranker,
     Reranker,
     RerankError,
+    configured_provider,
     create_rerank_chain,
     create_reranker,
 )
@@ -331,6 +334,13 @@ def test_cohere_request_and_order(cohere_key):
     assert r.name == "cohere" and r.calibrated is False
 
 
+def test_cohere_timeout_is_20_seconds(cohere_key):
+    """10 s timed out on about 1% of calls; Cohere now waits as long as Jev."""
+    assert COHERE_TIMEOUT == 20.0
+    assert Reranker()._http._kwargs["timeout"] == 20.0
+    assert JevReranker()._http._kwargs["timeout"] == 20.0
+
+
 def test_cohere_failure_falls_back_to_input_order_unless_strict(cohere_key):
     r = Reranker(transport=cohere_transport([], status=500))
     assert [x.index for x in r.rerank("q", ["a", "b", "c"], top_n=2)] == [0, 1]
@@ -344,21 +354,97 @@ def _names(chain) -> list[str]:
     return [p.name for p in chain]
 
 
-def test_default_provider_is_cohere(cohere_key):
+@pytest.mark.parametrize("keys, resolved, chain", [
+    ((), "none", []),
+    (("TYPESAFE_API_KEY",), "jev", ["jev"]),
+    (("COHERE_API_KEY",), "cohere", ["cohere"]),
+    (("TYPESAFE_API_KEY", "COHERE_API_KEY"), "jev", ["jev", "cohere"]),   # Cohere stays the fallback
+])
+def test_default_provider_is_auto(monkeypatch, keys, resolved, chain):
+    for k in keys:
+        monkeypatch.setenv(k, "x")
     cfg = cfgmod.load_config()
-    assert cfg["rerank"]["provider"] == "cohere"
+    assert cfg["rerank"]["provider"] == "auto"
     assert cfg["rerank"]["models"]["jev"] == {
         "model": "jev-latest", "api_key_env": "TYPESAFE_API_KEY",
         "batch_size": 30, "max_concurrency": 2, "max_retries": 2, "timeout": 20,
     }
     assert cfg["retrieval"]["api"]["min_relevance"] is None
-    assert _names(create_rerank_chain(cfg)) == ["cohere"]
+    assert configured_provider(cfg) == resolved
+    assert _names(create_rerank_chain(cfg)) == chain
+
+
+@pytest.mark.parametrize("provider, keys, resolved, chain", [
+    ("cohere", ("TYPESAFE_API_KEY", "COHERE_API_KEY"), "cohere", ["cohere"]),
+    ("none", ("TYPESAFE_API_KEY", "COHERE_API_KEY"), "none", []),
+    ("jev", (), "jev", []),          # selected without a key: reported as unavailable
+    ("cohere", (), "cohere", []),
+    ("AUTO", ("COHERE_API_KEY",), "cohere", ["cohere"]),
+    ("voyage", ("TYPESAFE_API_KEY",), "none", []),
+])
+def test_an_explicit_provider_wins_over_auto(monkeypatch, provider, keys, resolved, chain):
+    monkeypatch.setenv("REVIT_API_DOCS_RERANK_PROVIDER", provider)
+    for k in keys:
+        monkeypatch.setenv(k, "x")
+    cfg = cfgmod.load_config()
+    assert configured_provider(cfg) == resolved
+    assert _names(create_rerank_chain(cfg)) == chain
+
+
+def test_rerank_disabled_in_config_resolves_to_none(monkeypatch, jev_key):
+    cfg = cfgmod.load_config()
+    cfg["rerank"]["enabled"] = False
+    assert configured_provider(cfg) == "none" and create_rerank_chain(cfg) == []
 
 
 def test_no_key_means_no_rerank(caplog):
     caplog.set_level(logging.WARNING, logger="revit_api_docs.reranker")
     assert create_rerank_chain(cfgmod.load_config()) == []
-    assert "COHERE_API_KEY not set" in caplog.text
+    assert "provider auto" in caplog.text and "COHERE_API_KEY not set" in caplog.text
+
+
+@pytest.fixture
+def routed_rerank_http(monkeypatch):
+    """Rerank clients built from the config talk to MockTransports: Jev gives
+    Wall.Create entries 0.91 and the rest 0.12; Cohere puts the last candidate
+    first. Returns the number of requests per service."""
+    calls = {"jev": 0, "cohere": 0}
+    jev_t = jev_transport(_wall_create_first)
+    cohere_t = cohere_transport([0.1, 0.2, 0.3, 0.4, 0.5])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        service = "jev" if str(request.url) == JEV_URL else "cohere"
+        calls[service] += 1
+        return (jev_t if service == "jev" else cohere_t).handle_request(request)
+
+    real = rerank_mod._client_kwargs
+    monkeypatch.setattr(rerank_mod, "_client_kwargs",
+                        lambda timeout, proxy, transport: real(timeout, proxy,
+                                                               transport or httpx.MockTransport(handler)))
+    return calls
+
+
+@pytest.mark.parametrize("keys, first, requests", [
+    ((), "Rerank: none; data set: Revit 2026", {"jev": 0, "cohere": 0}),
+    (("TYPESAFE_API_KEY",), "Rerank: jev; data set: Revit 2026", {"jev": 1, "cohere": 0}),
+    (("COHERE_API_KEY",), "Rerank: cohere; data set: Revit 2026", {"jev": 0, "cohere": 1}),
+    (("TYPESAFE_API_KEY", "COHERE_API_KEY"), "Rerank: jev; data set: Revit 2026", {"jev": 1, "cohere": 0}),
+])
+def test_auto_provider_names_the_reranker_that_ran(tiny_dbs, tmp_path, monkeypatch, routed_rerank_http,
+                                                   keys, first, requests):
+    """Default config, no provider set: the first output line names the
+    provider the keys selected, and only that service is called."""
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for k in keys:
+        monkeypatch.setenv(k, "test-key")
+    api_db, sdk_db = tiny_dbs
+    r = RAGRetriever(cfgmod.load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    lines = server.search_api(r, "wall", 3).splitlines()
+    assert lines[0] == first
+    assert routed_rerank_http == requests
+    if "jev" in first:
+        assert lines[2] == "### Wall.Create" and lines[3] == "Relevance: 0.91"
 
 
 @pytest.mark.parametrize("keys, expected", [

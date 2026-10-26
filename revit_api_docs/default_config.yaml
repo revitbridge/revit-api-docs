@@ -60,13 +60,15 @@ embedding:
       api_key_env: "GOOGLE_API_KEY"
 
 # --- Rerank (optional; skipped without the provider's key) ---
-# provider: cohere | jev | none (env REVIT_API_DOCS_RERANK_PROVIDER).
+# provider: auto | jev | cohere | none (env REVIT_API_DOCS_RERANK_PROVIDER).
+# auto (default): jev when TYPESAFE_API_KEY is set, else cohere when
+# COHERE_API_KEY is set, else none; an explicit provider wins.
 # jev: TypeSafe System One, POST https://api.typesafe.ai/v1/systemone, one
 # noul question per candidate (calibrated 0-1 probability). When a Jev call
 # fails, Cohere is used if COHERE_API_KEY is set, otherwise no rerank.
 rerank:
   enabled: true
-  provider: "cohere"        # cohere | jev | none
+  provider: "auto"          # auto | jev | cohere | none
   models:
     cohere:
       model: "rerank-v3.5"
