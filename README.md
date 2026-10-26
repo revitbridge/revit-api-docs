@@ -99,9 +99,9 @@ misspelt or unknown name still gets candidates. The index is built next to
 the data set on first use (under a second). With an embedding key it adds
 semantic search over the vector store, and with a Cohere key it reranks the
 merged candidates; with a TypeSafe key it can rerank with Jev instead, which
-returns a calibrated relevance per entry and, with a threshold, says that no
-entry scored high enough instead of returning the closest guesses. See
-Configure.
+returns a calibrated relevance per entry. With a threshold set and no entry
+reaching it, the output starts with an abstention line and then lists the
+candidates with their relevance, for reference. See Configure.
 
 Try it from a terminal (installs the data set if needed):
 
