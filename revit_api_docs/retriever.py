@@ -16,7 +16,9 @@ Public API:
     context   = retriever.build_context(results)
 
 Degraded modes (no network keys needed for the MCP server to be useful):
-    - No embedding API key  -> vector search is skipped, SQLite keyword search only.
+    - No embedding API key  -> vector search is skipped, keyword search only
+                               (BM25 over an SQLite FTS5 index, see bm25.py;
+                               the LIKE scorer when FTS5 is missing).
     - No rerank API key     -> results keep vector/keyword order.
     - Jev call fails        -> Cohere reranks when its key is set, else no rerank;
                                SearchResults.rerank_used says which one ran.
@@ -37,6 +39,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from .bm25 import Bm25Index, fts5_available
 from .prompts import load_prompt
 
 
@@ -142,6 +145,16 @@ class RAGRetriever:
         # SQLite paths (opened per-query to avoid threading issues)
         self._api_db = api_db_path
         self._sdk_db = sdk_db_path
+
+        # Keyword search over the API reference: BM25 on an FTS5 index kept in
+        # its own file next to revit_api.db (built on first use), or the LIKE
+        # scorer when this sqlite3 build has no FTS5. One of the two per process.
+        self._bm25: Bm25Index | None = None
+        if fts5_available():
+            self._bm25 = Bm25Index(api_db_path)
+        else:
+            self._log.warning("SQLite FTS5 is not available in this Python build; keyword "
+                              "search uses the slower LIKE scorer")
 
         # Consistency check: record_count in the ChromaDB meta.json should equal
         # the SQLite revit_api row count; otherwise the two stores are out of sync.
@@ -396,9 +409,13 @@ class RAGRetriever:
         # Tier 2: Hydrate from SQLite (done above per source)
         t_hydrate = _time.monotonic() - t0 - t_rewrite - t_embed
 
-        # Tier 2.5: Keyword search on SQLite — merge with vector results
-        # This catches exact name/API matches that embedding search misses
-        kw_items = self._keyword_search_api(query, limit=final_api_n) if final_api_n > 0 else []
+        # Tier 2.5: Keyword search on SQLite - merge with vector results
+        # This catches exact name/API matches that embedding search misses.
+        # Without vector results the keyword search is the only source, so it
+        # supplies the full candidate pool for the reranker (top_k); next to
+        # vector results it adds final_api_n entries, as before.
+        lexical_k = final_api_n if vector_ok else retrieve_api_k
+        kw_items = self._keyword_search_api(query, limit=lexical_k) if lexical_k > 0 else []
         if kw_items:
             existing_ids = {item.chromadb_id for item in api_items}
             merged_count = 0
@@ -742,7 +759,69 @@ class RAGRetriever:
             conn.close()
 
     def _keyword_search_api(self, query: str, limit: int = 15) -> list[RetrievedItem]:
-        """Search API docs by keyword matching on name/full_id/summary.
+        """Keyword candidates from the API reference, best first.
+
+        BM25 over the FTS5 index (see bm25.py). When this sqlite3 has no FTS5,
+        or the index can be neither read nor built (read-only data directory),
+        the LIKE scorer below serves this and every later query instead.
+        """
+        if self._bm25 is not None:
+            try:
+                return self._bm25_search_api(query, limit)
+            except (sqlite3.Error, OSError) as e:
+                self._log.warning(f"keyword index unavailable ({type(e).__name__}: {e}); "
+                                  "keyword search uses the slower LIKE scorer from now on")
+                self._bm25 = None
+        return self._like_search_api(query, limit)
+
+    def _bm25_search_api(self, query: str, limit: int) -> list[RetrievedItem]:
+        """Top `limit` rows by BM25.
+
+        `distance` is 1 / (1 + score): monotonic in the BM25 score, lower is
+        better. It orders and trims the candidates; it is not a probability,
+        and `relevance` stays None.
+        """
+        hits = self._bm25.search(query, limit)
+        if not hits:
+            self._log.info(f"[keyword_search] bm25 query={query!r} found=0")
+            return []
+        ids = [rowid for rowid, _ in hits]
+        conn = sqlite3.connect(self._api_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT id, name, full_id, summary, info, syntax, parameters, remark "
+                f"FROM revit_api WHERE id IN ({','.join('?' * len(ids))})",
+                ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        by_id = {r["id"]: r for r in rows}
+        items = []
+        top3 = []
+        for rowid, score in hits:
+            r = by_id.get(rowid)
+            if r is None:
+                continue
+            if len(top3) < 3:
+                top3.append(((r["name"] or "")[:50], f"{score:.1f}"))
+            items.append(RetrievedItem(
+                source="api",
+                chromadb_id=str(rowid),
+                distance=1.0 / (1.0 + max(score, 0.0)),
+                name=r["name"] or "",
+                full_id=r["full_id"] or "",
+                summary=r["summary"] or "",
+                info=r["info"] or "",
+                syntax=r["syntax"] or "",
+                parameters=r["parameters"] or "",
+                remark=r["remark"] or "",
+            ))
+        self._log.info(f"[keyword_search] bm25 query={query!r} found={len(items)} top3={top3}")
+        return items
+
+    def _like_search_api(self, query: str, limit: int = 15) -> list[RetrievedItem]:
+        """Fallback keyword search without FTS5: LIKE matching on name/full_id/summary.
 
         1. SQL ranks every row that matches any token by a coarse relevance
            score and hands over the top _KEYWORD_CANDIDATES (see

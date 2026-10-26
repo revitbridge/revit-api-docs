@@ -9,7 +9,10 @@ import sys
 import pytest
 
 from revit_api_docs import config as cfgmod
+from revit_api_docs.bm25 import fts5_available
 from revit_api_docs.retriever import RAGRetriever, SearchResults
+
+BM25 = pytest.param("bm25", marks=pytest.mark.skipif(not fts5_available(), reason="no FTS5"))
 
 
 @pytest.fixture
@@ -47,13 +50,30 @@ def test_keyword_only_retriever_never_imports_openai(tiny_dbs, tmp_path):
     assert "embedding disabled" in out.stderr
 
 
+@pytest.mark.skipif(not fts5_available(), reason="no FTS5")
 def test_search_wall_create_ranks_exact_identifier_first(keyword_only_retriever):
     results = keyword_only_retriever.search("Wall.Create", api_top_k=5, code_top_k=0, rewrite=False)
     names = [i.name for i in results.api_items]
+    # BM25: the exact identifier's short overview page first; its overload and
+    # the longer Wall.CreateProfileSketch follow (length normalisation, no
+    # identifier bonus).
+    assert names[0] == "Wall.Create Method"
+    assert "Wall.Create(Document, Curve, ElementId, Boolean) Method" in names
+    assert "Wall.CreateProfileSketch Method" in names
+    assert all(i.relevance is None for i in results.api_items)  # BM25 is not a probability
+    distances = [i.distance for i in results.api_items]
+    assert distances == sorted(distances)
+    assert results.sdk_items == []
+
+
+def test_like_fallback_ranks_exact_identifier_first(keyword_only_retriever):
+    """The LIKE scorer (no FTS5) keeps its identifier bonuses."""
+    r = keyword_only_retriever
+    r._bm25 = None
+    names = [i.name for i in r.search("Wall.Create", api_top_k=5, code_top_k=0, rewrite=False).api_items]
     # exact identifier (overview + overloads) before the longer Wall.CreateProfileSketch
     assert names[:2] == ["Wall.Create Method", "Wall.Create(Document, Curve, ElementId, Boolean) Method"]
     assert names.index("Wall.CreateProfileSketch Method") > 1
-    assert results.sdk_items == []
 
 
 def test_top_k_zero_skips_a_source(keyword_only_retriever):
@@ -70,7 +90,7 @@ def test_sdk_keyword_fallback_matches_project_and_apis(keyword_only_retriever):
 
 def test_build_context_formats_api_and_code(keyword_only_retriever):
     r = keyword_only_retriever
-    results = r.search("Wall.Create", api_top_k=2, code_top_k=1, rewrite=False)
+    results = r.search("Wall.Create", api_top_k=3, code_top_k=1, rewrite=False)
     ctx = r.build_context(results)
     assert ctx["api_context"].startswith("### Wall.Create" + chr(10) + "Creates a wall within the project")
     assert chr(10) * 2 + "### M:Autodesk.Revit.DB.Wall.Create(" in ctx["api_context"]
@@ -96,10 +116,15 @@ def test_query_rewrite_is_skipped_without_llm(keyword_only_retriever, caplog):
     assert r.rewrite_query("create wall") == "create wall"
 
 
-def test_like_wildcards_are_escaped(keyword_only_retriever):
+@pytest.mark.parametrize("scorer", [BM25, "like"])
+def test_like_wildcards_are_escaped(keyword_only_retriever, scorer):
+    if scorer == "like":
+        keyword_only_retriever._bm25 = None
     results = keyword_only_retriever.search("wall_%", api_top_k=5, code_top_k=0, rewrite=False)
-    # "wall_%" must not act as a wildcard that matches everything
+    # "wall_%" must not act as a wildcard that matches everything (LIKE), and
+    # BM25 searches the term "wall" it contains
     assert all("wall" in i.name.lower() for i in results.api_items)
+    assert bool(results.api_items) is (scorer == "bm25")
 
 
 def test_search_results_dataclass_defaults():
@@ -168,9 +193,10 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
 
 # ── candidate selection ─────────────────────────────────────────────────────
 
-def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeypatch, tmp_path):
+@pytest.mark.parametrize("scorer", [BM25, "like"])
+def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeypatch, tmp_path, scorer):
     """Hundreds of summary-only hits with lower rowids must not push an exact
-    name match out of the SQL candidate set (the old LIMIT had no ORDER BY)."""
+    name match out of the candidate set (the old LIMIT had no ORDER BY)."""
     import sqlite3
 
     api_db, sdk_db = tiny_dbs
@@ -190,6 +216,8 @@ def test_exact_name_match_is_found_beyond_the_candidate_window(tiny_dbs, monkeyp
         monkeypatch.delenv(name, raising=False)
     r = RAGRetriever(cfgmod.load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
     monkeypatch.setattr(RAGRetriever, "_KEYWORD_CANDIDATES", 50)
+    if scorer == "like":
+        r._bm25 = None
 
     results = r.search("create floor from boundary", api_top_k=3, code_top_k=0, rewrite=False)
     assert [i.name for i in results.api_items][0] == "Floor.Create Method"

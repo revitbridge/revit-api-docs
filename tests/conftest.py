@@ -46,6 +46,38 @@ SDK_ROWS = [
 ]
 
 
+def find_shipped_dbs() -> tuple[Path, Path] | None:
+    """The shipped revit_api.db / revit_sdk.db (34 MB), or None.
+
+    Looked up in REVIT_API_DOCS_DATA_DIR or the default data directory. When
+    REVIT_API_DOCS_TEST_DOWNLOAD=1 they are fetched from the data release into
+    that directory first (CI does this and caches the files).
+    """
+    env = os.environ.get("REVIT_API_DOCS_DATA_DIR")
+    roots = [Path(env)] if env else []
+    roots.append(data.default_data_dir())
+    for root in roots:
+        p = data.paths(root)
+        if p.api_db.is_file() and p.sdk_db.is_file():
+            return p.api_db, p.sdk_db
+    if os.environ.get("REVIT_API_DOCS_TEST_DOWNLOAD") == "1":
+        root = roots[0]
+        for art in data.ARTIFACTS:
+            if not art.extract and not (root / art.target).is_file():
+                data.install_artifact(art, root, progress=data.stderr_progress)
+        p = data.paths(root)
+        return p.api_db, p.sdk_db
+    return None
+
+
+@pytest.fixture(scope="session")
+def shipped_dbs() -> tuple[Path, Path]:
+    found = find_shipped_dbs()
+    if found is None:
+        pytest.skip("shipped data set not available (set REVIT_API_DOCS_DATA_DIR or REVIT_API_DOCS_TEST_DOWNLOAD=1)")
+    return found
+
+
 @pytest.fixture
 def tiny_dbs(tmp_path: Path) -> tuple[Path, Path]:
     api_db = tmp_path / "revit_api.db"
