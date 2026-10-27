@@ -6,12 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-26
+
 Vector hits now come back as the entries they describe and count also
 without a reranker; reranking picks its provider from the keys that are set.
 The data set `v1.1-data` adds constructor and interface member pages, and its
 vector store lines up with the SQLite rows.
 
-**Upgrading**: on the first start the server replaces an installed
+**Upgrading from 0.2.0** (`uvx --refresh revit-api-docs`): on the first start the server replaces an installed
 `v1.0-data` (its `manifest.json` names the old release) with `v1.1-data`, a
 download of 267 MB (all four files); a data directory without a
 manifest (a hand-copied tree) is used as it is. With an embedding key and a
@@ -255,6 +257,7 @@ no git history).
 - CI (tests + build on Linux/Windows, Python 3.11/3.13) and PyPI Trusted
   Publishing on version tags.
 
-[Unreleased]: https://github.com/revitbridge/revit-api-docs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/revitbridge/revit-api-docs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/revitbridge/revit-api-docs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/revitbridge/revit-api-docs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/revitbridge/revit-api-docs/releases/tag/v0.1.0
