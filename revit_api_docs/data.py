@@ -10,8 +10,9 @@ History: `v1.1-data` keeps the 27,596 API rows of `v1.0-data` unchanged (same
 ids), appends the constructor and interface member pages from 27,597 on, and
 rebuilds the API vector store so that every record id is its row id (in
 `v1.0-data` they were numbered independently; the retriever matches by entry
-name either way). The two SDK files are the `v1.0-data` ones. A tree whose
-manifest names another release is downloaded again as a whole.
+name either way). Its records embed `name : summary` (`v1.0-data` embedded
+mostly the entry name alone). The two SDK files are the `v1.0-data` ones. A
+tree whose manifest names another release is downloaded again as a whole.
 
 Data directory (override with REVIT_API_DOCS_DATA_DIR):
     Windows  %LOCALAPPDATA%/revit-api-docs
@@ -70,8 +71,8 @@ ARTIFACTS: tuple[Artifact, ...] = (
              34_631_680, "sqlite/revit_api.db"),
     Artifact("revit_sdk.db", "f381f392485cd4910b2b826062414b5331c29f165269412ebb59569dd176e474",
              954_368, "sqlite/revit_sdk.db"),
-    Artifact("chromadb_api.tar.gz", "61f36de0339c30d51b883cca7b22d1b6d2b20613c21ee038a8840199e845acba",
-             229_987_656, "chromadb/chromadb_api", extract=True),
+    Artifact("chromadb_api.tar.gz", "68e986e2e90b1e9167823925a0089697df2ab681eb182e35e51c62b1a03d26a1",
+             230_005_566, "chromadb/chromadb_api", extract=True),
     Artifact("chromadb_code.tar.gz", "3ee38a4e44e4b41154faeafd431c830ca54275d2738897971e5780cb493118ad",
              1_792_184, "chromadb/chromadb_code", extract=True),
 )

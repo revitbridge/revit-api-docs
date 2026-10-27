@@ -52,14 +52,17 @@ def _write_meta(output_dir: str, config: dict, record_count: int, source: str,
 
 
 # API 记录的嵌入文本模板（metadata 不受影响，始终含 name、full_id、summary、info）：
-#   FS（默认）：full_id : summary；无 full_id 时 name : summary；无 summary 时 name - info；
-#              再无则把可用字段用 " - " 连起来
-#   NS：name : summary；无 summary 时 name - info；再无则 name
+#   NS（默认，v1.1-data 发布库）：name : summary；无 summary 时 name - info；再无则 name
+#   FS：full_id : summary；无 full_id 时 name : summary；无 summary 时 name - info；
+#       再无则把可用字段用 " - " 连起来（第八批之前的写法）
 #   N ：只有 name
-DOCUMENT_TEMPLATES = ("FS", "NS", "N")
+# 第八批 8b 在 v3 查询集上比较三者后选 NS（notes 侧的评测记录）。
+DOCUMENT_TEMPLATES = ("NS", "FS", "N")
+DEFAULT_DOCUMENT_TEMPLATE = "NS"
 
 
-def api_document_text(row_id, name, full_id, summary, info, template: str = "FS") -> str:
+def api_document_text(row_id, name, full_id, summary, info,
+                      template: str = DEFAULT_DOCUMENT_TEMPLATE) -> str:
     """一条 API 记录的嵌入文本（见 DOCUMENT_TEMPLATES）。"""
     if template == "N":
         text = name or ""
@@ -90,14 +93,14 @@ def api_document_text(row_id, name, full_id, summary, info, template: str = "FS"
 
 
 def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size: int = 50,
-                   resume: bool = False, document_template: str = "FS"):
+                   resume: bool = False, document_template: str = DEFAULT_DOCUMENT_TEMPLATE):
     """
     将 API 数据向量化并存入 ChromaDB（记录 id = SQLite 行 id）
 
     resume=False（默认）：删除旧 collection 后全量重建。
     resume=True：保留已有 collection，只补嵌入缺失的行 id（中断后续跑）。
-    document_template：嵌入文本模板 FS（默认，行为不变）/ NS / N，见 DOCUMENT_TEMPLATES；
-    写入 meta.json 的 document_template。
+    document_template：嵌入文本模板 NS（默认，与 v1.1-data 发布库相同）/ FS / N，
+    见 DOCUMENT_TEMPLATES；写入 meta.json 的 document_template。
     """
     if document_template not in DOCUMENT_TEMPLATES:
         raise ValueError(f"unknown document_template {document_template!r}; one of {DOCUMENT_TEMPLATES}")

@@ -26,7 +26,9 @@ where a run stopped):
              --max-consecutive-failures; the remaining rows are not audited
   4. db      copy of the base + the new rows (columns of save_to_sqlite),
              VACUUM; asserts the base rows are unchanged
-  5. embed   every row into a fresh chromadb_api (record id = row id)
+  5. embed   every row into a fresh chromadb_api (record id = row id); the
+             embedded text is --document-template (default NS, name : summary,
+             as in the v1.1-data release)
   6. package release/ holds the four assets: revit_api.db,
              chromadb_api.tar.gz (one top-level dir chromadb_api/),
              revit_sdk.db (copied from next to --base-db) and
@@ -896,9 +898,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--verbose-quality", action="store_true", help="the quality agent's own progress output")
     ap.add_argument("--embed-max-texts", type=int, default=29500)
     ap.add_argument("--embed-max-requests", type=int, default=600)
-    ap.add_argument("--document-template", choices=("FS", "NS", "N"), default="FS",
-                    help="embedded text per API row: FS full_id : summary (default), "
-                         "NS name : summary, N name only (pipeline/embedder/embed.py)")
+    ap.add_argument("--document-template", choices=("NS", "FS", "N"), default="NS",
+                    help="embedded text per API row: NS name : summary (default, the v1.1-data "
+                         "store), FS full_id : summary, N name only (pipeline/embedder/embed.py)")
     ap.add_argument("--limit", type=int, help="smoke test: keep only the first N new rows")
     ap.add_argument("--resume", action="store_true", help="reuse the finished steps under <out>/work")
     ap.add_argument("--skip-embed", action="store_true", help="stop after the SQLite step")
