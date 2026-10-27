@@ -41,6 +41,11 @@ Cohere).
   query no longer logs `vector_store_misaligned` (`download` reports
   `aligned`). The SDK files (`revit_sdk.db`, `chromadb_code.tar.gz`) are the
   `v1.0-data` ones.
+- The vector documents are now `name : summary` (`v1.0-data` embedded mostly
+  the entry name alone: 21,952 of its 28,863 records); on the 223 test
+  queries this raised fused nDCG@5 without a reranker from 0.610 to 0.647
+  (task requests 0.438 to 0.459) and left it with Jev at 0.842 against 0.846
+  (task requests 0.778 against 0.794).
 - `pipeline/build_data_v1_1.py` (sdist only): builds `v1.1-data` from the
   `v1.0-data` SQLite and the CHM pages: appends the pages the base lacks
   (pages whose name is in the base under another `full_id`, or whose content
@@ -82,9 +87,9 @@ Cohere).
   reranker vector-only hits never reached the top 5, and up to 60 candidates
   went to the reranker. Without an embedding key the BM25 order and results
   are unchanged. On 223 English test queries without reranking (measured on
-  `v1.0-data`): nDCG@5 0.565
-  -> 0.610 overall and 0.365 -> 0.438 on the 113 multi-step task requests,
-  whose answer is among the top 30 for 84% instead of 73% of them.
+  `v1.1-data`): nDCG@5 0.557 with BM25 alone, 0.647 fused, and 0.355 -> 0.459
+  on the 113 multi-step task requests, whose answer is among the top 30 for
+  82% instead of 72% of them.
 - The default rerank provider is `auto`: Jev when `TYPESAFE_API_KEY` is set,
   otherwise Cohere when `COHERE_API_KEY` is set, otherwise none.
   `REVIT_API_DOCS_RERANK_PROVIDER` (now `auto`, `jev`, `cohere` or `none`)
@@ -102,11 +107,12 @@ Cohere).
   page); a page with neither a signature nor a members table is still
   skipped.
 - `pipeline.embedder.embed.embed_api_data(..., resume=False,
-  document_template="FS")`: with `resume=True` the collection is kept and
+  document_template="NS")`: with `resume=True` the collection is kept and
   only missing row ids are embedded; `document_template` picks the embedded
-  text per API row (`FS` `full_id : summary`, the default and the old
-  behaviour; `NS` `name : summary`; `N` the entry name) and is recorded in
-  `meta.json`. `pipeline/build_data_v1_1.py --document-template` passes it on.
+  text per API row (`NS` `name : summary`, the default and the `v1.1-data`
+  store; `FS` `full_id : summary`, the earlier behaviour; `N` the entry name)
+  and is recorded in `meta.json`. `pipeline/build_data_v1_1.py
+  --document-template` passes it on (default `NS`).
 
 ## [0.2.0] - 2026-10-26
 

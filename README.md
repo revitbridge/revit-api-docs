@@ -145,18 +145,17 @@ provider (`auto`) uses it whenever `TYPESAFE_API_KEY` is set. Cohere is
 optional: `auto` uses it when only `COHERE_API_KEY` is set, and with both keys
 it is the fallback for a failed Jev call. Measured on `v1.0-data`: on 60
 English test queries (50 with a known answer) over the keyword (BM25)
-candidates, with no embedding key, Jev
-raised nDCG@5 from 0.675 to 0.871 and never turned a correct top-5 answer into
-a miss. On 223 further queries over the same candidates Jev reached an nDCG@5
-of 0.788 against Cohere's 0.674. Input tokens cost about $0.23 per 1,000
+candidates, with no embedding key, Jev raised nDCG@5 from 0.675 to 0.871 and
+never turned a correct top-5 answer into a miss. On 223 further queries over
+the same candidates Jev reached an nDCG@5 of 0.788 against Cohere's 0.674. Input tokens cost about $0.23 per 1,000
 queries; Cohere bills $2 per 1,000 searches.
 `REVIT_API_DOCS_MIN_RELEVANCE` stays unset by default. Set to 0.15 it filters
 out clearly unrelated queries (questions that are not about Revit, types this
 data set does not have), abstaining on about 2.5% of the queries that do have
-an answer (measured on `v1.0-data`). It cannot spot a misspelt or misplaced member name: such a query
-usually gets the closest real API as the first result, to be confirmed with a
-compile check. **Do not use 0.5**: it abstained on 14% of the queries that
-have an answer. What TypeSafe keeps: see the `jev-data-handling` note
+an answer (measured on `v1.0-data`). It cannot spot a misspelt or misplaced
+member name: such a query usually gets the closest real API as the first
+result, to be confirmed with a compile check. **Do not use 0.5**: it
+abstained on 14% of the queries that have an answer. What TypeSafe keeps: see the `jev-data-handling` note
 (`uvx revit-api-docs environment typesafe`).
 
 **Vector search.** An embedding key (`REVIT_API_DOCS_EMBEDDING_API_KEY`, or
@@ -164,10 +163,10 @@ have an answer. What TypeSafe keeps: see the `jev-data-handling` note
 (about 0.9 s). The vector hits and the BM25 hits, 30 of each, are fused by
 reciprocal rank (score = sum of 1 / (60 + rank)) and the best 30 go to the
 reranker; without a reranker they are cut to `top_k`. On 223 English test
-queries without reranking (measured on `v1.0-data`), fusion raised nDCG@5
-from 0.565 (BM25 alone) to
-0.610, and on the 113 of them that describe a multi-step task from 0.365 to
-0.438, with an answer among the top 30 for 84% of those instead of 73%. Each
+queries without reranking (measured on `v1.1-data`), fusion raises nDCG@5
+from 0.557 (BM25 alone) to 0.647, and on the 113 of them that describe a
+multi-step task from 0.355 to 0.459, with an answer among the top 30 for 82%
+of those instead of 72%. Each
 vector hit is matched to its entry by name. On the first vector query the
 server samples 50 records of each vector collection: when the record ids do
 not line up with the rows it logs the warning `vector_store_misaligned` and
