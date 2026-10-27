@@ -81,7 +81,8 @@ Cohere).
   two lists were merged by distances on different scales, so without a
   reranker vector-only hits never reached the top 5, and up to 60 candidates
   went to the reranker. Without an embedding key the BM25 order and results
-  are unchanged. On 223 English test queries without reranking: nDCG@5 0.565
+  are unchanged. On 223 English test queries without reranking (measured on
+  `v1.0-data`): nDCG@5 0.565
   -> 0.610 overall and 0.365 -> 0.438 on the 113 multi-step task requests,
   whose answer is among the top 30 for 84% instead of 73% of them.
 - The default rerank provider is `auto`: Jev when `TYPESAFE_API_KEY` is set,
@@ -100,8 +101,12 @@ Cohere).
   members such as `void Execute(UIApplication app)` were skipped as a whole
   page); a page with neither a signature nor a members table is still
   skipped.
-- `pipeline.embedder.embed.embed_api_data(..., resume=False)`: with
-  `resume=True` the collection is kept and only missing row ids are embedded.
+- `pipeline.embedder.embed.embed_api_data(..., resume=False,
+  document_template="FS")`: with `resume=True` the collection is kept and
+  only missing row ids are embedded; `document_template` picks the embedded
+  text per API row (`FS` `full_id : summary`, the default and the old
+  behaviour; `NS` `name : summary`; `N` the entry name) and is recorded in
+  `meta.json`. `pipeline/build_data_v1_1.py --document-template` passes it on.
 
 ## [0.2.0] - 2026-10-26
 
