@@ -72,18 +72,34 @@ def test_wall_create_stays_first_through_the_tool(shipped):
     assert text.startswith("Rerank: none; data set: Revit 2026" + chr(10) * 2 + "### Wall.Create" + chr(10)), text[:200]
 
 
+def _installed_release(api_db) -> str:
+    """The release named by the data directory's manifest; a tree without one
+    is taken to be the release this package installs."""
+    manifest = data.read_manifest(api_db.parent.parent) or {}
+    return manifest.get("release") or data.RELEASE_TAG
+
+
 def test_shipped_vector_store_is_matched_by_name(shipped_dbs):
-    """v1.0-data: the record ids of the API vector store are not revit_api row
-    ids, the entry names are. The nearest records to the vector of `Wall.Create
-    Method` come back as the rows that carry their names. No embedding call:
-    the query vector is the record's own."""
+    """The nearest records to the vector of `Wall.Create Method` come back as
+    the rows that carry their names. No embedding call: the query vector is
+    the record's own. v1.1-data: every record id is its revit_api row id.
+    The older v1.0-data: the record ids are not row ids, the entry names are."""
     api_db, sdk_db = shipped_dbs
     p = data.paths(api_db.parent.parent)
     if not all((d / "chroma.sqlite3").is_file() for d in (p.chromadb_api, p.chromadb_code)):
         pytest.skip("the shipped vector store is not installed")
+    old = _installed_release(api_db) == "v1.0-data"
     api, sdk = check_vector_stores(str(api_db), str(sdk_db), str(p.chromadb_api), str(p.chromadb_code))
-    assert (api.status, api.records, api.sampled) == ("misaligned", 28863, 50)
-    assert api.id_matches <= 2 and api.name_matches >= 45, api
+    if old:
+        assert (api.status, api.records, api.sampled) == ("misaligned", 28863, 50)
+        assert api.id_matches <= 2 and api.name_matches >= 45, api
+    else:
+        conn = sqlite3.connect(api_db)
+        try:
+            rows = conn.execute("SELECT COUNT(*) FROM revit_api").fetchone()[0]
+        finally:
+            conn.close()
+        assert (api.status, api.records, api.sampled, api.id_matches) == ("aligned", rows, 50, 50), api
     assert (sdk.status, sdk.records, sdk.id_matches) == ("aligned", 153, 50), sdk
 
     r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(p.chromadb_api), str(p.chromadb_code))
@@ -100,7 +116,35 @@ def test_shipped_vector_store_is_matched_by_name(shipped_dbs):
         by_id = conn.execute("SELECT name FROM revit_api WHERE id = ?", (int(raw["ids"][0][0]),)).fetchone()
     finally:
         conn.close()
-    assert by_id is None or by_id[0] != "Wall.Create Method"   # what the id lookup returned
+    if old:
+        assert by_id is None or by_id[0] != "Wall.Create Method"   # what the id lookup returned
+    else:
+        assert by_id is not None and by_id[0] == "Wall.Create Method"
+        assert [i.chromadb_id for i in items] == [str(x) for x in raw["ids"][0]]   # rule 1: own id
+
+
+# Pages added in v1.1-data: constructors and members whose C# signature has no
+# `public` (interface members). The older v1.0-data has none of them.
+NEW_IN_V1_1 = [
+    ("XYZ constructor", "XYZ(Double, Double, Double) Constructor"),
+    ("new Transaction(document, name)", "Transaction(Document, String) Constructor"),
+    ("IExternalEventHandler.Execute", "IExternalEventHandler.Execute Method"),
+]
+
+
+@pytest.mark.parametrize("query,name", NEW_IN_V1_1)
+def test_constructor_and_interface_member_pages_are_found(shipped, shipped_dbs, query, name):
+    api_db, _ = shipped_dbs
+    if _installed_release(api_db) == "v1.0-data":
+        pytest.skip("v1.0-data has no constructor or interface member pages")
+    conn = sqlite3.connect(api_db)
+    try:
+        rows = conn.execute("SELECT id, full_id FROM revit_api WHERE name = ?", (name,)).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1 and rows[0][0] > 27596, rows   # appended after the v1.0-data rows
+    text = server.search_api(shipped, query, 10)
+    assert f"### {rows[0][1] or name}" + chr(10) in text, text[:600]
 
 
 def test_keyword_index_sits_next_to_the_shipped_db(shipped, shipped_dbs):

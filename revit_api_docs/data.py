@@ -1,10 +1,18 @@
 """Data set location and first-run download.
 
 The API reference (SQLite) and the vector stores (ChromaDB directories) are
-not in the wheel; they come from the GitHub Release `v1.0-data` of this
+not in the wheel; they come from the GitHub Release `v1.1-data` of this
 repository. `ensure_data()` downloads whatever is missing into the data
 directory, verifies each file against the SHA-256 recorded below, unpacks the
 tarballs and writes `manifest.json`.
+
+History: `v1.1-data` keeps the 27,596 API rows of `v1.0-data` unchanged (same
+ids), appends the constructor and interface member pages from 27,597 on, and
+rebuilds the API vector store so that every record id is its row id (in
+`v1.0-data` they were numbered independently; the retriever matches by entry
+name either way). Its records embed `name : summary` (`v1.0-data` embedded
+mostly the entry name alone). The two SDK files are the `v1.0-data` ones. A
+tree whose manifest names another release is downloaded again as a whole.
 
 Data directory (override with REVIT_API_DOCS_DATA_DIR):
     Windows  %LOCALAPPDATA%/revit-api-docs
@@ -41,7 +49,7 @@ log = logging.getLogger("revit_api_docs.data")
 ENV_DATA_DIR = "REVIT_API_DOCS_DATA_DIR"
 ENV_RELEASE_URL = "REVIT_API_DOCS_RELEASE_URL"
 
-RELEASE_TAG = "v1.0-data"
+RELEASE_TAG = "v1.1-data"
 RELEASE_URL = f"https://github.com/revitbridge/revit-api-docs/releases/download/{RELEASE_TAG}"
 
 ProgressFn = Callable[[str, int, int], None]
@@ -59,12 +67,12 @@ class Artifact:
 
 
 ARTIFACTS: tuple[Artifact, ...] = (
-    Artifact("revit_api.db", "38f78297b11b5fb4aa8a0c609e2a0535b5d2f6770ea895c8468742e6d4a7bf72",
-             33_611_776, "sqlite/revit_api.db"),
+    Artifact("revit_api.db", "e6e323ad6d00a76f0b068b843658d7295160054a10d04dc060cd6f9be509cf1b",
+             34_631_680, "sqlite/revit_api.db"),
     Artifact("revit_sdk.db", "f381f392485cd4910b2b826062414b5331c29f165269412ebb59569dd176e474",
              954_368, "sqlite/revit_sdk.db"),
-    Artifact("chromadb_api.tar.gz", "2db7c2fafa45defb1cc56522c5c5455741549d42d56bbec918a93554c4b15c73",
-             299_124_932, "chromadb/chromadb_api", extract=True),
+    Artifact("chromadb_api.tar.gz", "68e986e2e90b1e9167823925a0089697df2ab681eb182e35e51c62b1a03d26a1",
+             230_005_566, "chromadb/chromadb_api", extract=True),
     Artifact("chromadb_code.tar.gz", "3ee38a4e44e4b41154faeafd431c830ca54275d2738897971e5780cb493118ad",
              1_792_184, "chromadb/chromadb_code", extract=True),
 )

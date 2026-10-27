@@ -19,13 +19,19 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 
-def parse_single_html(html_path: str) -> dict | None:
+def parse_single_html(html_path: str, *, keep_constructors: bool = False) -> dict | None:
     """
     解析单个 API HTML 文件，提取结构化数据
 
+    Args:
+        html_path:         HTML 文件路径
+        keep_constructors: True 时保留构造函数页（data release v1.1 起收录）；
+                           默认 False，与旧行为相同（丢弃构造函数页）
+
     Returns:
         dict with keys: name, full_id, namespace, content_type, info, summary,
-                        remark, parameters, exceptions, members, keywords
+                        remark, parameters, exceptions, members, keywords,
+                        _source_file（源 HTML 路径，供 quality_agent 读取原文；不入 SQLite）
         如果不是有效的 API 文档页面返回 None
     """
     try:
@@ -52,8 +58,9 @@ def parse_single_html(html_path: str) -> dict | None:
         return None
 
     # --- 过滤构造函数页面（ctor） ---
-    # 构造函数仅描述如何实例化对象，不含方法逻辑，对 RAG 检索意义有限
-    if _is_constructor_page(title, full_id):
+    # 旧版默认丢弃构造函数页；keep_constructors=True 时保留（v1.1-data 起收录，
+    # `new XYZ(x, y, z)`、`new Transaction(doc, name)` 之类的查询需要它们）
+    if not keep_constructors and _is_constructor_page(title, full_id):
         return None
 
     # 命名空间
@@ -184,8 +191,10 @@ def _extract_api_fullname(soup: BeautifulSoup, title: str) -> str | None:
 
 def _extract_csharp_signature(soup: BeautifulSoup) -> str:
     """
-    从 HTML 中提取 C# 方法签名，仅保留包含 public 的签名。
-    对应旧版 get_csharp_full_name 逻辑。
+    从 HTML 中提取 C# 签名（IDAB_code_Div1 的 <pre>，非空即可）。
+    对应旧版 get_csharp_full_name 逻辑；旧版只保留含 public 的签名，接口成员
+    （如 `void Execute(UIApplication app)`）与显式接口实现因此被整页跳过，
+    现在不再要求 public。
     """
     div = soup.find("div", id="IDAB_code_Div1")
     if not div:
@@ -196,7 +205,7 @@ def _extract_csharp_signature(soup: BeautifulSoup) -> str:
         return ""
 
     text = pre.get_text(separator=" ", strip=True)
-    if "public" not in text:
+    if not text:
         return ""
 
     # 归一化空白
@@ -345,16 +354,18 @@ def _extract_members_table(topic_content) -> str:
     return "\n".join(members)
 
 
-def parse_all_api_html(html_dir: str, *, limit: int | None = None) -> list[dict]:
+def parse_all_api_html(html_dir: str, *, limit: int | None = None,
+                       keep_constructors: bool = False) -> list[dict]:
     """
     解析目录下所有（或前 limit 个）API HTML 文件
 
     Args:
-        html_dir: CHM 解压后的 HTML 文件目录
-        limit:    仅解析前 N 个文件（调试用），None 表示全量
+        html_dir:          CHM 解压后的 HTML 文件目录
+        limit:             仅解析前 N 个文件（调试用），None 表示全量
+        keep_constructors: True 时保留构造函数页（见 parse_single_html）
 
     Returns:
-        list of parsed API data dicts（已过滤构造函数、命名空间页等噪音）
+        list of parsed API data dicts（已过滤命名空间页等噪音；默认也过滤构造函数）
     """
     results = []
     html_dir = Path(html_dir)
@@ -372,7 +383,7 @@ def parse_all_api_html(html_dir: str, *, limit: int | None = None) -> list[dict]
         if i % 1000 == 0 and i > 0:
             print(f"  解析进度: {i}/{total}  有效={len(results)}  ctor跳过={skipped_ctor}  噪音跳过={skipped_noise}")
         try:
-            data = parse_single_html(str(html_file))
+            data = parse_single_html(str(html_file), keep_constructors=keep_constructors)
             if data:
                 results.append(data)
             else:

@@ -8,14 +8,51 @@ All notable changes to this project are documented here. The format follows
 
 Vector hits now come back as the entries they describe and count also
 without a reranker; reranking picks its provider from the keys that are set.
+The data set `v1.1-data` adds constructor and interface member pages, and its
+vector store lines up with the SQLite rows.
 
-**Upgrading**: with an embedding key the first vector query logs the warning
-`vector_store_misaligned` for the `v1.0-data` release: its record ids do not
-line up with the SQLite rows, and hits are now matched by entry name. Without
-any key nothing changes. Reranker choice: with only `COHERE_API_KEY` set Cohere
-still reranks; with `TYPESAFE_API_KEY` set Jev now reranks without
+**Upgrading**: on the first start the server replaces an installed
+`v1.0-data` (its `manifest.json` names the old release) with `v1.1-data`, a
+download of 267 MB (all four files); a data directory without a
+manifest (a hand-copied tree) is used as it is. With an embedding key and a
+tree that still holds `v1.0-data`, the first vector query logs the warning
+`vector_store_misaligned`: its record ids do not line up with the SQLite rows,
+and hits are matched by entry name. Without any key nothing changes beyond the
+new entries. Reranker choice: with only `COHERE_API_KEY` set Cohere still
+reranks; with `TYPESAFE_API_KEY` set Jev now reranks without
 `REVIT_API_DOCS_RERANK_PROVIDER=jev` (set the provider to `cohere` to keep
 Cohere).
+
+### Added
+
+- Data set `v1.1-data` (`RELEASE_TAG`; the download URL and SHA-256 list in
+  `data.py` follow it): the 27,596 entries of `v1.0-data` are kept unchanged
+  under the same ids, and 1,266 pages of the same reference are appended
+  (ids 27,597-28,862): 1,040 constructor pages (`XYZ(Double, Double, Double)
+  Constructor`, `Transaction(Document, String) Constructor`, overload lists)
+  and 226 members whose C# signature has no `public`, mostly interface
+  members (`IExternalEventHandler.Execute`, `IConnector.Origin`,
+  `IFailuresPreprocessor.PreprocessFailures`) and explicit interface
+  implementations. 28,862 entries in all. Source: `RevitAPI.chm` of the
+  Revit 2026.3 SDK, whose pages are the same set as the Revit 2026 reference
+  the first release was built from. The API vector store is rebuilt from the
+  new SQLite with the same model (`text-embedding-3-large`, 3072 dimensions):
+  one record per row and every record id is its row id, so the first vector
+  query no longer logs `vector_store_misaligned` (`download` reports
+  `aligned`). The SDK files (`revit_sdk.db`, `chromadb_code.tar.gz`) are the
+  `v1.0-data` ones.
+- The vector documents are now `name : summary` (`v1.0-data` embedded mostly
+  the entry name alone: 21,952 of its 28,863 records); on the 223 test
+  queries this raised fused nDCG@5 without a reranker from 0.610 to 0.647
+  (task requests 0.438 to 0.459) and left it with Jev at 0.842 against 0.846
+  (task requests 0.778 against 0.794).
+- `pipeline/build_data_v1_1.py` (sdist only): builds `v1.1-data` from the
+  `v1.0-data` SQLite and the CHM pages: appends the pages the base lacks
+  (pages whose name is in the base under another `full_id`, or whose content
+  is a base row's under a name the v1.0 rewrite changed, are listed and not
+  appended), runs the quality agent on the new rows only, re-embeds every
+  row, packages the four release files with `SHA256SUMS.txt` and checks the
+  vector store against the rows without an API call.
 
 ### Fixed
 
@@ -49,9 +86,10 @@ Cohere).
   two lists were merged by distances on different scales, so without a
   reranker vector-only hits never reached the top 5, and up to 60 candidates
   went to the reranker. Without an embedding key the BM25 order and results
-  are unchanged. On 223 English test queries without reranking: nDCG@5 0.565
-  -> 0.610 overall and 0.365 -> 0.438 on the 113 multi-step task requests,
-  whose answer is among the top 30 for 84% instead of 73% of them.
+  are unchanged. On 223 English test queries without reranking (measured on
+  `v1.1-data`): nDCG@5 0.557 with BM25 alone, 0.647 fused, and 0.355 -> 0.459
+  on the 113 multi-step task requests, whose answer is among the top 30 for
+  82% instead of 72% of them.
 - The default rerank provider is `auto`: Jev when `TYPESAFE_API_KEY` is set,
   otherwise Cohere when `COHERE_API_KEY` is set, otherwise none.
   `REVIT_API_DOCS_RERANK_PROVIDER` (now `auto`, `jev`, `cohere` or `none`)
@@ -60,7 +98,21 @@ Cohere).
 - Cohere requests time out after 20 s instead of 10 s (the same as Jev); 10 s
   cut off about 1% of calls.
 - `search_revit_api` and `get_code_examples` are unchanged: names,
-  parameters and the first output line.
+  parameters and the first output line. The tool description now counts
+  28,862 entries.
+- CHM parser (`pipeline/api_parser/parse_chm.py`): `parse_single_html` and
+  `parse_all_api_html` take `keep_constructors` (default `False`, the old
+  behaviour); the C# signature no longer has to contain `public` (interface
+  members such as `void Execute(UIApplication app)` were skipped as a whole
+  page); a page with neither a signature nor a members table is still
+  skipped.
+- `pipeline.embedder.embed.embed_api_data(..., resume=False,
+  document_template="NS")`: with `resume=True` the collection is kept and
+  only missing row ids are embedded; `document_template` picks the embedded
+  text per API row (`NS` `name : summary`, the default and the `v1.1-data`
+  store; `FS` `full_id : summary`, the earlier behaviour; `N` the entry name)
+  and is recorded in `meta.json`. `pipeline/build_data_v1_1.py
+  --document-template` passes it on (default `NS`).
 
 ## [0.2.0] - 2026-10-26
 

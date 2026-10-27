@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .data-cache/sqlite
-          key: revit-api-docs-sqlite-v1.0-data
+          key: revit-api-docs-sqlite-v1.1-data
       - name: Sync
         run: uv sync
       - name: Test

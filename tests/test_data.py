@@ -38,8 +38,8 @@ def test_artifact_table_matches_release_layout():
     names = [a.name for a in data.ARTIFACTS]
     assert names == ["revit_api.db", "revit_sdk.db", "chromadb_api.tar.gz", "chromadb_code.tar.gz"]
     assert all(len(a.sha256) == 64 for a in data.ARTIFACTS)
-    assert data.RELEASE_URL.endswith("/releases/download/v1.0-data")
-    assert data.TOTAL_DOWNLOAD_BYTES > 300_000_000
+    assert data.RELEASE_URL.endswith("/releases/download/v1.1-data")
+    assert data.TOTAL_DOWNLOAD_BYTES > 250_000_000   # v1.1-data: 267 MB
 
 
 def test_missing_trusts_a_manifestless_tree_and_rejects_other_releases(tmp_path):
