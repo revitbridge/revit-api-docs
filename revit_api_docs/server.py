@@ -222,8 +222,9 @@ def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 async def search_revit_api(query: str, top_k: int = 10) -> str:
-    """Search the Revit 2026 API reference (27,596 classes, methods, properties,
-    enums). Returns each match with its signature, parameters and remarks.
+    """Search the Revit 2026 API reference (28,862 classes, constructors,
+    methods, properties, enums). Returns each match with its signature,
+    parameters and remarks.
     Query in English with an API name ("Wall.Create") or a short task
     ("rotate element around axis"); the reference is English only, so rewrite
     other languages into English API keywords first. The first line (the

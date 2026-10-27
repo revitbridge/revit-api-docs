@@ -19,11 +19,12 @@ Public API:
     context   = retriever.build_context(results)
 
 Vector records and SQLite rows: a record id need not be the id of the row the
-record was built from. In the v1.0-data release it is not: its 28,863 API
-records are numbered independently of the 27,596 rows of revit_api. A vector
-hit is therefore matched to the row whose entry name equals the record's
-metadata: the row with the record's own id when that row carries the name,
-otherwise the row of that name; among rows sharing a name, the one whose
+record was built from. In the older v1.0-data release it is not: its 28,863
+API records are numbered independently of the 27,596 rows of revit_api. In
+v1.1-data every record id is its row id. A vector hit is therefore matched to
+the row whose entry name equals the record's metadata: the row with the
+record's own id when that row carries the name (always the case with
+v1.1-data), otherwise the row of that name; among rows sharing a name, the one whose
 full_id or info equals the record's, else the lowest id. Records whose name is
 not in SQLite are dropped. The name map is built on the first vector query and
 kept in memory for the process (never written to disk).
@@ -32,7 +33,8 @@ Consistency probe: on the first vector query, 50 records of each collection
 are sampled and compared with SQLite. When fewer than 90% of the sampled ids
 name the same entry as the row with that id, the warning
 `vector_store_misaligned` is logged and hits are matched by name as above (the
-shipped data set is in this state). When fewer than 50% of the sampled names
+older v1.0-data is in this state; v1.1-data is aligned and logs nothing at
+WARNING). When fewer than 50% of the sampled names
 are found in SQLite at all, the same warning says that vector search is off,
 and it stays off for the process (vector_search_enabled becomes False; keyword
 search only). The result is cached for the process; check_vector_stores()
@@ -440,8 +442,9 @@ class RAGRetriever:
                               "search uses the slower LIKE scorer")
 
         # Size check: record_count in the ChromaDB meta.json against the SQLite
-        # revit_api row count. Logged at INFO: the shipped v1.0-data differs
-        # (28863 vectors, 27596 rows). Vector hits are matched to rows by entry
+        # revit_api row count. Logged at INFO: the older v1.0-data differs
+        # (28863 vectors, 27596 rows; v1.1-data has one record per row,
+        # 28862). Vector hits are matched to rows by entry
         # name, so the counts need not agree; the consistency probe on the
         # first vector query checks what matters (see the module docstring).
         try:

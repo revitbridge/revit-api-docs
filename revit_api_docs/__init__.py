@@ -2,7 +2,7 @@
 
 An optional companion to revit-bridge for models that do not know the Revit
 API well. It answers two questions over a local copy of the Revit 2026 API
-reference (27,596 entries) and the SDK samples: "which API do I call?" and
+reference (28,862 entries) and the SDK samples: "which API do I call?" and
 "how does the SDK use it?". The data set is downloaded from a GitHub Release
 on first run; the package never talks to Revit.
 """
