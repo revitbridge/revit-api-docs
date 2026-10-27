@@ -48,9 +48,13 @@ def _write_meta(output_dir: str, config: dict, record_count: int, source: str):
     print(f"已写入 {meta_path}")
 
 
-def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size: int = 50):
+def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size: int = 50,
+                   resume: bool = False):
     """
-    将 API 数据向量化并存入 ChromaDB
+    将 API 数据向量化并存入 ChromaDB（记录 id = SQLite 行 id）
+
+    resume=False（默认）：删除旧 collection 后全量重建。
+    resume=True：保留已有 collection，只补嵌入缺失的行 id（中断后续跑）。
     """
     os.makedirs(chromadb_dir, exist_ok=True)
     embedder = create_embedding(config)
@@ -68,11 +72,12 @@ def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size
     print(f"从 {api_db_path} 读取 {len(rows)} 条 API 数据")
 
     client = chromadb.PersistentClient(path=chromadb_dir)
-    # 全量重建：先删除旧 collection，保证与 SQLite 完全对齐
-    try:
-        client.delete_collection("revit_api")
-    except Exception:
-        pass
+    # 全量重建：先删除旧 collection，保证与 SQLite 完全对齐（resume 时保留，只补缺）
+    if not resume:
+        try:
+            client.delete_collection("revit_api")
+        except Exception:
+            pass
     collection = client.get_or_create_collection(
         name="revit_api",
         metadata={"description": "Revit API documentation embeddings"}
