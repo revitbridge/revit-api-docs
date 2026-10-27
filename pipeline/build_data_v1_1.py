@@ -733,7 +733,8 @@ def stage_embed(db: Path, chroma_dir: Path, work: Path, args) -> dict:
     embed_mod.create_embedding = create
     t0 = time.perf_counter()
     try:
-        embed_mod.embed_api_data(config, str(db), str(chroma_dir), batch_size=50, resume=args.resume)
+        embed_mod.embed_api_data(config, str(db), str(chroma_dir), batch_size=50, resume=args.resume,
+                                 document_template=args.document_template)
     finally:
         embed_mod.create_embedding = real_create
         release_chroma_clients()
@@ -741,6 +742,7 @@ def stage_embed(db: Path, chroma_dir: Path, work: Path, args) -> dict:
     stats["cost_estimated_usd"] = round(stats["prompt_tokens"] * pin / 1e6, 4)
     stats["cost_reported_usd"] = round(stats["cost_reported_usd"], 4)
     stats["model"] = model_cfg["model"]
+    stats["document_template"] = args.document_template
     stats["seconds"] = round(time.perf_counter() - t0, 1)
     history["runs"].append(dict(stats, finished_at=_dt.datetime.now().isoformat(timespec="seconds")))
     write_json(stats_file, history)
@@ -894,6 +896,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--verbose-quality", action="store_true", help="the quality agent's own progress output")
     ap.add_argument("--embed-max-texts", type=int, default=29500)
     ap.add_argument("--embed-max-requests", type=int, default=600)
+    ap.add_argument("--document-template", choices=("FS", "NS", "N"), default="FS",
+                    help="embedded text per API row: FS full_id : summary (default), "
+                         "NS name : summary, N name only (pipeline/embedder/embed.py)")
     ap.add_argument("--limit", type=int, help="smoke test: keep only the first N new rows")
     ap.add_argument("--resume", action="store_true", help="reuse the finished steps under <out>/work")
     ap.add_argument("--skip-embed", action="store_true", help="stop after the SQLite step")
@@ -917,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         "args": {"html_dir": str(args.html_dir), "base_db": str(base_db), "out": str(out),
                  "quality": args.quality, "max_rewrites": args.max_rewrites, "stage1_cap": args.stage1_cap,
                  "quality_budget": args.quality_budget, "limit": args.limit, "resume": args.resume,
-                 "skip_embed": args.skip_embed},
+                 "skip_embed": args.skip_embed, "document_template": args.document_template},
         "python": sys.version.split()[0], "chromadb": chromadb.__version__,
     }
     t_all = time.perf_counter()

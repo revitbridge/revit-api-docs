@@ -27,8 +27,9 @@ def _embed_with_retry(embedder, texts: list[str], retries: int = 3, backoff: flo
     raise last_err  # type: ignore[misc]
 
 
-def _write_meta(output_dir: str, config: dict, record_count: int, source: str):
-    """写入 meta.json，记录 embedding 模型信息"""
+def _write_meta(output_dir: str, config: dict, record_count: int, source: str,
+                document_template: str | None = None):
+    """写入 meta.json，记录 embedding 模型信息（API 库另记嵌入文本模板）"""
     provider = config["embedding"]["provider"]
     model_config = config["embedding"]["models"][provider]
 
@@ -41,6 +42,8 @@ def _write_meta(output_dir: str, config: dict, record_count: int, source: str):
         "record_count": record_count,
         "source": source,
     }
+    if document_template:
+        meta["document_template"] = document_template
 
     meta_path = os.path.join(output_dir, "meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
@@ -48,14 +51,56 @@ def _write_meta(output_dir: str, config: dict, record_count: int, source: str):
     print(f"已写入 {meta_path}")
 
 
+# API 记录的嵌入文本模板（metadata 不受影响，始终含 name、full_id、summary、info）：
+#   FS（默认）：full_id : summary；无 full_id 时 name : summary；无 summary 时 name - info；
+#              再无则把可用字段用 " - " 连起来
+#   NS：name : summary；无 summary 时 name - info；再无则 name
+#   N ：只有 name
+DOCUMENT_TEMPLATES = ("FS", "NS", "N")
+
+
+def api_document_text(row_id, name, full_id, summary, info, template: str = "FS") -> str:
+    """一条 API 记录的嵌入文本（见 DOCUMENT_TEMPLATES）。"""
+    if template == "N":
+        text = name or ""
+    elif template == "NS":
+        if name and summary:
+            text = f"{name} : {summary}"
+        elif name and info:
+            text = f"{name} - {info}"
+        else:
+            text = name or ""
+    elif template == "FS":
+        if full_id and summary:
+            text = f"{full_id} : {summary}"
+        elif name and summary:
+            text = f"{name} : {summary}"
+        elif name and info:
+            text = f"{name} - {info}"
+        else:
+            # 最后回退：合并所有可用字段
+            parts = [p for p in [full_id, name, summary, info] if p]
+            text = " - ".join(parts) if parts else ""
+    else:
+        raise ValueError(f"unknown document_template {template!r}; one of {DOCUMENT_TEMPLATES}")
+    # 空文本会导致 embedding 报错——回退为 name 或 id
+    if not text.strip():
+        text = name or str(row_id)
+    return text
+
+
 def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size: int = 50,
-                   resume: bool = False):
+                   resume: bool = False, document_template: str = "FS"):
     """
     将 API 数据向量化并存入 ChromaDB（记录 id = SQLite 行 id）
 
     resume=False（默认）：删除旧 collection 后全量重建。
     resume=True：保留已有 collection，只补嵌入缺失的行 id（中断后续跑）。
+    document_template：嵌入文本模板 FS（默认，行为不变）/ NS / N，见 DOCUMENT_TEMPLATES；
+    写入 meta.json 的 document_template。
     """
+    if document_template not in DOCUMENT_TEMPLATES:
+        raise ValueError(f"unknown document_template {document_template!r}; one of {DOCUMENT_TEMPLATES}")
     os.makedirs(chromadb_dir, exist_ok=True)
     embedder = create_embedding(config)
 
@@ -96,23 +141,7 @@ def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size
         metadatas = []
         for row in batch:
             _id, name, full_id, summary, info = row
-
-            if full_id and summary:
-                text = f"{full_id} : {summary}"
-            elif name and summary:
-                text = f"{name} : {summary}"
-            elif name and info:
-                text = f"{name} - {info}"
-            else:
-                # 最后回退：合并所有可用字段
-                parts = [p for p in [full_id, name, summary, info] if p]
-                text = " - ".join(parts) if parts else ""
-
-            # 空文本会导致 embedding 报错——回退为 name 或 id
-            if not text.strip():
-                text = name or str(_id)
-
-            texts.append(text)
+            texts.append(api_document_text(_id, name, full_id, summary, info, document_template))
             metadatas.append(
                 {
                     "name": name or "",
@@ -134,7 +163,7 @@ def embed_api_data(config: dict, api_db_path: str, chromadb_dir: str, batch_size
         if (i // batch_size) % 10 == 0:
             print(f"  API embedding 进度: {i + len(batch)}/{len(rows)}")
 
-    _write_meta(chromadb_dir, config, len(rows), "RevitAPI CHM")
+    _write_meta(chromadb_dir, config, len(rows), "RevitAPI CHM", document_template=document_template)
     print(f"API 向量化完成，共 {len(rows)} 条，存入 {chromadb_dir}")
 
 
