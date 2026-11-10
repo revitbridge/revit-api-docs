@@ -430,6 +430,68 @@ def test_download_reports_files_in_use_without_a_traceback(monkeypatch, tmp_path
     assert "close other revit-api-docs processes and retry" in err
 
 
+# -- names pipeline/ uses ------------------------------------------------------
+
+def test_extract_tarball_unpacks_and_replaces_the_target(tmp_path):
+    """pipeline/build_data_v1_1.py unpacks the code store with data._extract_tarball:
+    the target becomes the archive's top-level directory, replacing what was there."""
+    archive = tmp_path / "chromadb_code.tar.gz"
+    archive.write_bytes(_tar_with_dir("chromadb_code", {"chroma.sqlite3": b"c", "seg/link_lists.bin": b"l"}))
+    target = tmp_path / "out" / "chromadb" / "chromadb_code"
+    data._extract_tarball(archive, target)   # (a) no target, no parent yet
+    assert _tree(target) == {"chroma.sqlite3": b"c", "seg/link_lists.bin": b"l"}
+
+    (target / "stale.bin").write_bytes(b"from an earlier build")
+    archive.write_bytes(_tar_with_dir("chromadb_code", {"chroma.sqlite3": b"new"}))
+    data._extract_tarball(archive, target)   # (b) an existing target is replaced as a whole
+    assert _tree(target) == {"chroma.sqlite3": b"new"}
+    assert [p.name for p in target.parent.iterdir()] == ["chromadb_code"]   # no staging or previous copy left
+
+
+def test_every_package_name_the_pipeline_uses_exists():
+    """The tests never run pipeline/; this catches a package name it imports,
+    or reads from an imported module (data._extract_tarball), being removed."""
+    import ast
+    import importlib
+
+    root = Path(__file__).resolve().parents[1]
+    absent: list[str] = []
+    checked = 0
+    for path in sorted((root / "pipeline").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "revit_api_docs"):
+                continue
+            scope = node   # the function the import is in, or the module
+            while scope in parents and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope = parents[scope]
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                where = f"{path.relative_to(root).as_posix()}:{node.lineno}"
+                if hasattr(module, alias.name):
+                    value = getattr(module, alias.name)
+                else:
+                    try:
+                        value = importlib.import_module(f"{node.module}.{alias.name}")
+                    except ImportError:
+                        absent.append(f"{where} {node.module}.{alias.name}")
+                        continue
+                checked += 1
+                if not isinstance(value, type(ast)):   # a function or class: nothing more to check
+                    continue
+                bound = alias.asname or alias.name
+                for use in ast.walk(scope):
+                    if (isinstance(use, ast.Attribute) and isinstance(use.value, ast.Name)
+                            and use.value.id == bound):
+                        checked += 1
+                        if not hasattr(value, use.attr):
+                            absent.append(f"{path.relative_to(root).as_posix()}:{use.lineno} "
+                                          f"{bound}.{use.attr}")
+    assert checked >= 15   # the check saw the pipeline's imports
+    assert absent == []
+
+
 def test_manifest_never_claims_release_hashes_for_pre_existing_files(fake_release, tmp_path, caplog):
     payloads, _ = fake_release
     # a foreign DB, a DB that happens to be the release bytes, and a pre-existing index directory

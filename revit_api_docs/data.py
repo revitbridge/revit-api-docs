@@ -335,18 +335,14 @@ def fetch_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None
     return part
 
 
-def _stage(art: Artifact, part: Path, root: Path) -> tuple[Path, Path | None]:
-    """The verified download ready to be moved into place, and a scratch
-    directory to remove afterwards. A file is moved as it is; a tarball
-    (one top-level directory) is unpacked into a hidden directory next to
-    its target, so that moving it in is a rename on the same volume."""
-    if not art.extract:
-        return part, None
-    target = root / art.target
+def _unpack_beside(archive: Path, target: Path) -> tuple[Path, Path]:
+    """Unpack `archive` (one top-level directory) into a hidden directory next
+    to `target`, so that moving it in is a rename on the same volume. Returns
+    the unpacked tree and the scratch directory to remove afterwards."""
     target.parent.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(prefix=f".{target.name}-new-", dir=target.parent))
     try:
-        with tarfile.open(part, "r:gz") as tar:
+        with tarfile.open(archive, "r:gz") as tar:
             try:
                 tar.extractall(scratch, filter="data")
             except TypeError:  # Python < 3.11.4 without the filter argument
@@ -357,6 +353,15 @@ def _stage(art: Artifact, part: Path, root: Path) -> tuple[Path, Path | None]:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
     return staged, scratch
+
+
+def _stage(art: Artifact, part: Path, root: Path) -> tuple[Path, Path | None]:
+    """The verified download ready to be moved into place, and a scratch
+    directory to remove afterwards: a file as it is, a tarball unpacked next
+    to its target (_unpack_beside)."""
+    if not art.extract:
+        return part, None
+    return _unpack_beside(part, root / art.target)
 
 
 def _swap_in(staged: Path, target: Path) -> Path | None:
@@ -403,6 +408,18 @@ def _undo_swap(target: Path, staged: Path, backup: Path | None) -> None:
         return
     if backup is not None:
         _put_back(backup, target)
+
+
+def _extract_tarball(archive: Path, target: Path) -> None:
+    """Unpack `archive` (which holds one top-level directory) to `target`,
+    replacing what is there (pipeline/build_data_v1_1.py uses it)."""
+    staged, scratch = _unpack_beside(archive, target)
+    try:
+        backup = _swap_in(staged, target)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if backup is not None:
+        _remove(backup)
 
 
 def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> None:
