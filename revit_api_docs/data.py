@@ -101,8 +101,28 @@ def default_data_dir() -> Path:
 
 
 def data_dir() -> Path:
+    """REVIT_API_DOCS_DATA_DIR as an absolute path, else the default location."""
     env = os.environ.get(ENV_DATA_DIR)
-    return Path(env).expanduser() if env else default_data_dir()
+    return Path(os.path.abspath(Path(env).expanduser())) if env else default_data_dir()
+
+
+def pin_data_dir() -> Path:
+    """Resolve the data directory once, at start-up, and return it.
+
+    A relative REVIT_API_DOCS_DATA_DIR is taken against the working
+    directory, which differs between MCP clients, so the same setting could
+    install the data set in several places. Its absolute form is written
+    back to the environment (later lookups in this process agree even if the
+    working directory changes) and a warning names it.
+    """
+    env = os.environ.get(ENV_DATA_DIR)
+    root = data_dir()
+    if env and not Path(env).expanduser().is_absolute():
+        os.environ[ENV_DATA_DIR] = str(root)
+        log.warning("%s=%r is relative to the working directory, which differs between MCP "
+                    "clients; using %s for this process. Set an absolute path to keep one data set.",
+                    ENV_DATA_DIR, env, root)
+    return root
 
 
 def release_url() -> str:

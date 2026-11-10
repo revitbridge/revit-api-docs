@@ -313,6 +313,18 @@ def test_bad_serve_options_are_rejected(recorded_run, argv, capsys):
     assert recorded_run == []
 
 
+def test_serve_pins_a_relative_data_dir_before_starting(recorded_run, monkeypatch, tmp_path, caplog):
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", "data")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    assert server.main(["serve"]) == 0
+    assert recorded_run == [("stdio", {})]
+    assert os.environ["REVIT_API_DOCS_DATA_DIR"] == os.path.join(os.getcwd(), "data")
+    assert "REVIT_API_DOCS_DATA_DIR" in caplog.text and "is relative" in caplog.text
+
+
 def test_host_and_port_without_http_are_ignored_with_a_warning(recorded_run, caplog):
     caplog.set_level(logging.WARNING, logger="revit_api_docs.server")
     server.main(["serve", "--host", "0.0.0.0"])

@@ -6,6 +6,7 @@ import http.server
 import io
 import json
 import logging
+import os
 import sys
 import tarfile
 import threading
@@ -22,6 +23,36 @@ def test_data_dir_env_override(monkeypatch, tmp_path):
     p = data.paths()
     assert p.api_db == tmp_path / "custom" / "sqlite" / "revit_api.db"
     assert p.chromadb_api == tmp_path / "custom" / "chromadb" / "chromadb_api"
+
+
+def test_a_relative_data_dir_is_made_absolute(monkeypatch, tmp_path):
+    """A relative REVIT_API_DOCS_DATA_DIR would name a different place for every
+    working directory (each MCP client starts the server in its own)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", os.path.join("rel", "data"))
+    root = data.data_dir()
+    assert root.is_absolute()
+    assert root == Path(os.getcwd()) / "rel" / "data"
+    assert data.paths().api_db == root / "sqlite" / "revit_api.db"
+
+
+def test_a_relative_data_dir_is_pinned_once_at_start_up(monkeypatch, tmp_path, caplog):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", os.path.join("rel", "data"))
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    root = data.pin_data_dir()
+    assert root == Path(os.getcwd()) / "rel" / "data"
+    assert os.environ["REVIT_API_DOCS_DATA_DIR"] == str(root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert data.data_dir() == root   # a later change of directory does not move the data set
+    assert "is relative" in caplog.text and str(root) in caplog.text
+
+    caplog.clear()   # an absolute value (or none) is left alone and logs nothing
+    assert data.pin_data_dir() == root and caplog.text == ""
+    monkeypatch.delenv("REVIT_API_DOCS_DATA_DIR")
+    assert data.pin_data_dir() == data.default_data_dir() and caplog.text == ""
 
 
 def test_default_data_dir_per_platform(monkeypatch):

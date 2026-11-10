@@ -394,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "environment":
         return _print_environment(args.query, args.revit)
 
+    data.pin_data_dir()   # one absolute data directory for the whole process
+
     if args.command == "download":
         paths = data.ensure_data(progress=data.stderr_progress)
         print(f"data ready in {paths.root}", file=sys.stderr)
