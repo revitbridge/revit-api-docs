@@ -583,6 +583,47 @@ def test_any_rerank_failure_keeps_the_retrieval_order(tiny_dbs, tmp_path, monkey
     assert "rerank provider jev failed" in caplog.text and "DecodingError" in caplog.text
 
 
+def _cohere_answer(results: list[dict]):
+    return httpx.MockTransport(lambda request: httpx.Response(200, json={"results": results}))
+
+
+@pytest.mark.parametrize("results", [
+    [],                                                   # HTTP 200, no results
+    [{"index": 99, "relevance_score": 0.9}],              # only indices outside the candidates
+    [{"index": -1, "relevance_score": 0.9}],
+], ids=["empty", "out-of-range", "negative"])
+def test_an_empty_rerank_answer_keeps_the_candidates(tiny_dbs, tmp_path, monkeypatch, cohere_key, caplog, results):
+    """Candidates existed: an answer that ranks none of them is a provider
+    failure, not "No API entries found"."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="cohere",
+                   chain=[Reranker(transport=_cohere_answer(results))])
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    expected = plain.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert len(res.api_items) == 3
+    assert res.rerank_used == "none" and res.rerank_skipped == ["cohere"]
+    assert "rerank provider cohere ranked none of the 5 candidates" in caplog.text
+    lines = server.search_api(r, "wall", 3).splitlines()
+    assert lines[0] == "Rerank: none (unavailable: cohere); data set: Revit 2026"
+    assert lines[2].startswith("### ")
+
+
+def test_an_empty_jev_answer_falls_back_to_cohere(tiny_dbs, tmp_path, monkeypatch, cohere_key):
+    class _EmptyJev:
+        name, calibrated = "jev", True
+
+        def rerank(self, query, documents, top_n=15, *, strict=False):
+            return []
+
+    chain = [_EmptyJev(), Reranker(transport=cohere_transport([0.0, 0.9, 0.1]))]
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.5", chain=chain)
+    res = r.search("wall", api_top_k=2, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "cohere" and res.rerank_skipped == ["jev"] and len(res.api_items) == 2
+    assert not res.abstained   # abstention needs Jev's scores; an empty list is not "nothing relevant"
+
+
 class _BuggyProvider:
     """A provider with a programming error: raises neither RerankError nor an HTTP error."""
 

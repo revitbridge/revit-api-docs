@@ -794,15 +794,28 @@ class RAGRetriever:
                                       f"({type(e).__name__}: {e}); {nxt}", exc_info=True)
                     rerank_skipped.append(provider.name)
                     continue
-                # Reorder api_items by rerank scores
+                # Reorder api_items by rerank scores. Only indices of actual
+                # candidates count, each once. An answer that ranks none of
+                # them (HTTP 200 with an empty list) is a failed call: the
+                # candidates stay. "Nothing relevant" is said through scores
+                # (abstention below), never by an empty list.
+                ranked, seen = [], set()
+                for rr in reranked:
+                    if isinstance(rr.index, int) and 0 <= rr.index < len(api_items) and rr.index not in seen:
+                        seen.add(rr.index)
+                        ranked.append(rr)
+                if not ranked:
+                    self._log.warning(f"[search] rerank provider {provider.name} ranked none of the "
+                                      f"{len(api_items)} candidates; {nxt}")
+                    rerank_skipped.append(provider.name)
+                    continue
                 calibrated = bool(getattr(provider, "calibrated", False))
                 reranked_items = []
-                for rr in reranked:
-                    if rr.index < len(api_items):
-                        item = api_items[rr.index]
-                        item.distance = 1.0 - rr.score  # convert score to distance
-                        item.relevance = rr.score if calibrated else None
-                        reranked_items.append(item)
+                for rr in ranked:
+                    item = api_items[rr.index]
+                    item.distance = 1.0 - rr.score  # convert score to distance
+                    item.relevance = rr.score if calibrated else None
+                    reranked_items.append(item)
                 api_items = reranked_items
                 rerank_used = provider.name
                 reranked_ok = True
