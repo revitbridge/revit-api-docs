@@ -59,6 +59,31 @@ def test_missing_trusts_a_manifestless_tree_and_rejects_other_releases(tmp_path)
     assert [a.name for a in data.missing(root)] == [a.name for a in data.ARTIFACTS]
 
 
+def _complete_tree(root: Path) -> None:
+    """Every artifact present (placeholder contents), no manifest."""
+    for art in data.ARTIFACTS:
+        target = root / art.target
+        if art.extract:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "chroma.sqlite3").write_bytes(b"x")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"hand-copied")
+
+
+@pytest.mark.parametrize("text", ["[]", "null", "42", '"v1.1-data"', "{}", '{"release": 5}',
+                                  '{"files": {}}', "not json", "﻿{"])
+def test_a_manifest_that_is_not_an_object_with_a_release_counts_as_absent(tmp_path, text):
+    """A manifest.json this installer did not write (a list, null, a number, an
+    object without a release name) is treated as absent: the tree is used as
+    it is instead of failing on every start or being downloaded again."""
+    _complete_tree(tmp_path)
+    (tmp_path / "manifest.json").write_text(text, encoding="utf-8")
+    assert data.missing(tmp_path) == []
+    assert data.read_manifest(tmp_path) is None
+    assert data.ensure_data(tmp_path).root == tmp_path   # no download, no exception
+
+
 # -- progress reporting -------------------------------------------------------
 
 class _FakeStderr(io.StringIO):

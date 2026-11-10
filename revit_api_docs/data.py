@@ -144,13 +144,22 @@ def unexpected_sizes(root: Path) -> list[tuple[Artifact, int]]:
 
 
 def read_manifest(root: Path) -> dict | None:
+    """The manifest this installer wrote, or None.
+
+    None also for a file that is unreadable, is not JSON, or is not an
+    object naming a release: such a file was not written by this installer
+    and counts as absent (the tree is used as it is).
+    """
     p = root / "manifest.json"
     if not p.is_file():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        manifest = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("release"), str):
+        return None
+    return manifest
 
 
 def missing(root: Path | None = None) -> list[Artifact]:
@@ -312,7 +321,8 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
         for art in todo:
             install_artifact(art, p.root, progress=progress)
         write_manifest(p.root, installed=[a.name for a in todo])
-        trusted = [n for n, e in read_manifest(p.root)["files"].items() if e.get("trusted")]
+        files = (read_manifest(p.root) or {}).get("files") or {}
+        trusted = [n for n, e in files.items() if e.get("trusted")]
         if trusted:
             log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
         shutil.rmtree(p.root / "downloads", ignore_errors=True)
