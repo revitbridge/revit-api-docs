@@ -1,6 +1,7 @@
 """Data directory resolution and the download/verify/extract path, served from a local HTTP server."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import io
@@ -416,6 +417,55 @@ def test_a_previous_copy_that_cannot_be_removed_is_retried_and_reported(fake_rel
     assert len(left) == 2
     assert all(str(tmp_path / "chromadb") in m and "delete it by hand" in m for m in left)
     assert any(".chromadb_api.old-" in m for m in left) and any(".chromadb_code.old-" in m for m in left)
+
+
+def test_a_failed_manifest_write_rolls_the_install_back(fake_release, tmp_path, monkeypatch):
+    """Disk full while writing the manifest after the swaps: the tree goes
+    back to the release its manifest names, and the verified downloads stay,
+    so the next start installs without downloading again."""
+    payloads, hits = fake_release
+    old = _old_release_tree(tmp_path)
+    real_write = data.write_manifest
+
+    def disk_full(root, installed=()):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(data, "write_manifest", disk_full)
+    with pytest.raises(OSError, match="No space left"):
+        data.ensure_data(tmp_path)
+
+    after = _tree(tmp_path)
+    for path, content in old.items():
+        assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+    assert json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["release"] == "v1.0-data"
+    kept = sorted(p.name for p in (tmp_path / "downloads").iterdir())
+    assert kept == sorted(f"{name}.part" for name in payloads)
+
+    monkeypatch.setattr(data, "write_manifest", real_write)
+    requests = len(hits)
+    p = data.ensure_data(tmp_path)
+    assert len(hits) == requests and p.api_db.read_bytes() == payloads["revit_api.db"]
+    assert data.read_manifest(tmp_path)["release"] == data.RELEASE_TAG and data.missing(tmp_path) == []
+
+
+def test_the_manifest_is_replaced_whole_or_not_at_all(fake_release, tmp_path, monkeypatch):
+    """A write that fails halfway leaves the previous manifest as it was (an
+    unreadable one would count as no manifest: the old release used as is)."""
+    _old_release_tree(tmp_path)
+    before = (tmp_path / "manifest.json").read_bytes()
+    real_write_text = Path.write_text
+
+    def half_then_full(self, text, *args, **kwargs):
+        if "manifest" in self.name:
+            real_write_text(self, text[:len(text) // 2], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write_text(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", half_then_full)
+    with pytest.raises(OSError, match="No space left"):
+        data.write_manifest(tmp_path)
+    assert (tmp_path / "manifest.json").read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["chromadb", "manifest.json", "sqlite"]
 
 
 @pytest.fixture

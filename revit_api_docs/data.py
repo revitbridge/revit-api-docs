@@ -281,10 +281,11 @@ class DataInUseError(RuntimeError):
 RENAME_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
 
 
-def _rename(src: Path, dst: Path) -> None:
+def _rename(src: Path, dst: Path, *, replace: bool = False) -> None:
+    """os.rename (os.replace with `replace`), retried while Windows refuses it."""
     for delay in (*RENAME_RETRY_DELAYS, None):
         try:
-            os.rename(src, dst)
+            (os.replace if replace else os.rename)(src, dst)
             return
         except PermissionError:
             if delay is None:
@@ -498,10 +499,11 @@ def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> N
 
     Every artifact is downloaded and verified, and the tarballs unpacked next
     to their targets, before anything in place changes. Then each target is
-    swapped in by renames (_swap_in). When one cannot be (DataInUseError: a
-    file of the installed copy is open elsewhere), the ones already swapped
-    are swapped back, so the installed tree stays as it was, and the verified
-    downloads stay in root/downloads for the next try.
+    swapped in by renames (_swap_in) and the manifest is written. When a
+    target cannot be swapped (DataInUseError: a file of the installed copy
+    is open elsewhere) or the manifest cannot be written, the ones already
+    swapped are swapped back: the tree stays the one its manifest names, and
+    the verified downloads stay in root/downloads for the next try.
     """
     _restore_interrupted_swaps(root)
     parts = [fetch_artifact(art, root, progress) for art in todo]
@@ -516,6 +518,7 @@ def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> N
         for art, path, _ in staged:
             target = root / art.target
             swapped.append((target, path, _swap_in(path, target)))
+        write_manifest(root, installed=[a.name for a in todo])
     except BaseException:
         for target, path, backup in reversed(swapped):
             _undo_swap(target, path, backup)
@@ -524,7 +527,6 @@ def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> N
         for _, _, scratch in staged:
             if scratch is not None:
                 shutil.rmtree(scratch, ignore_errors=True)
-    write_manifest(root, installed=[a.name for a in todo])
     files = (read_manifest(root) or {}).get("files") or {}
     trusted = [n for n, e in files.items() if e.get("trusted")]
     if trusted:
@@ -549,7 +551,11 @@ def usable_as_is(root: Path | None = None) -> bool:
 
 def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
     """Record the tree under `root`; `installed` names the artifacts this run
-    downloaded and verified (see describe_artifact for the rest)."""
+    downloaded and verified (see describe_artifact for the rest).
+
+    Written to a temporary file that then replaces manifest.json, so a write
+    that fails (disk full) leaves the previous manifest as it was.
+    """
     root.mkdir(parents=True, exist_ok=True)
     done = set(installed)
     manifest = {
@@ -558,7 +564,15 @@ def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "files": {a.name: describe_artifact(root, a, a.name in done) for a in ARTIFACTS},
     }
-    (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    tmp = root / f".manifest.json.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        _rename(tmp, root / "manifest.json", replace=True)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 if sys.platform == "win32":
