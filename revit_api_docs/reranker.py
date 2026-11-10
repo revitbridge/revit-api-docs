@@ -54,6 +54,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .config import config_proxy_url, normalize_proxy_url
+
 _log = logging.getLogger("revit_api_docs.reranker")
 
 # Cohere native rerank endpoint
@@ -154,7 +156,10 @@ HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20,
 
 def _client_kwargs(timeout: float, proxy: str | None,
                    transport: httpx.BaseTransport | None) -> dict[str, Any]:
+    """Without a proxy argument httpx reads HTTPS_PROXY/HTTP_PROXY itself
+    (and adds http:// to a value without a scheme, as normalize_proxy_url does)."""
     kwargs: dict[str, Any] = {"timeout": timeout, "limits": HTTP_LIMITS}
+    proxy = normalize_proxy_url(proxy)
     if proxy:
         kwargs["proxy"] = proxy
     if transport is not None:
@@ -465,10 +470,7 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
 # -- Factory ----------------------------------------------------------------
 
 def _proxy_url(config: dict) -> str | None:
-    proxy_cfg = config.get("proxy", {}) or {}
-    if proxy_cfg.get("enabled", False):
-        return proxy_cfg.get("https") or proxy_cfg.get("http")
-    return None
+    return config_proxy_url(config)
 
 
 def _requested_provider(config: dict) -> str:

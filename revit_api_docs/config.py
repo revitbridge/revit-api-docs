@@ -125,18 +125,38 @@ def get_config() -> dict[str, Any]:
     return _config
 
 
+PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
+
+
+def normalize_proxy_url(value: Any) -> str | None:
+    """A proxy setting in the form httpx accepts, or None when it is unset.
+
+    Empty or blank is unset. A value without a scheme ("127.0.0.1:7890", the
+    form common local proxy tools write) gets "http://", as httpx itself does
+    for proxy environment variables; a value with a scheme (http, https,
+    socks5, ...) is kept as it is.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    return value if "://" in value else f"http://{value}"
+
+
+def config_proxy_url(config: dict[str, Any]) -> str | None:
+    """The config's `proxy` section (https, else http) when enabled, normalised."""
+    proxy_cfg = config.get("proxy") or {}
+    if not proxy_cfg.get("enabled"):
+        return None
+    return normalize_proxy_url(proxy_cfg.get("https")) or normalize_proxy_url(proxy_cfg.get("http"))
+
+
 def get_proxy_url() -> str | None:
-    """Proxy URL from HTTPS_PROXY/HTTP_PROXY, else from the config, else None."""
-    from_env = (
-        os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-        or os.getenv("https_proxy") or os.getenv("http_proxy")
-    )
-    if from_env:
-        return from_env
+    """Proxy URL from HTTPS_PROXY/HTTP_PROXY, else from the config, else None (normalised)."""
+    for name in PROXY_ENV_VARS:
+        from_env = normalize_proxy_url(os.getenv(name))
+        if from_env:
+            return from_env
     try:
-        proxy_cfg = get_config().get("proxy", {})
+        return config_proxy_url(get_config())
     except FileNotFoundError:
         return None
-    if proxy_cfg.get("enabled"):
-        return proxy_cfg.get("https") or proxy_cfg.get("http") or None
-    return None
