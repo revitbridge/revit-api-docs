@@ -366,12 +366,33 @@ def serve(transport: str = "stdio", host: str = DEFAULT_HTTP_HOST, port: int = D
     mcp.run(transport="stdio")
 
 
+def _prepare_text_stdout() -> None:
+    """Make stdout safe for the `search` and `environment` output (never used by `serve`).
+
+    A console keeps its own encoding (code page 936 on Chinese Windows),
+    and a character it cannot show becomes "?" instead of raising; output
+    that is redirected or piped is UTF-8.
+    """
+    out = sys.stdout
+    reconfigure = getattr(out, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        console = bool(out.isatty())
+    except (AttributeError, ValueError):
+        console = False
+    if console:
+        reconfigure(errors="replace")
+    else:
+        reconfigure(encoding="utf-8", errors="replace")
+
+
 def _print_environment(query: str, revit) -> int:
     from revit_api_docs import environment
 
     notes = (environment.match(query, revit=revit, limit=None) if query.strip()
              else environment.select(revit))
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    _prepare_text_stdout()
     for n in notes:
         print(f"[{n.id}] {environment.describe_range(n)} | tags: {', '.join(n.tags)}")
         print(f"  {n.text}")
@@ -431,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
             text = search_examples(retriever, args.query, _clamp_top_k(args.top_k or 3, 3))
         else:
             text = search_api(retriever, args.query, _clamp_top_k(args.top_k or 10, 10))
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        _prepare_text_stdout()
         print(text)
         return 0
 

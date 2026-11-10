@@ -3,6 +3,7 @@ and a real stdio round trip with a keyword-only retriever."""
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import socket
 import subprocess
@@ -208,6 +209,65 @@ def test_download_reports_the_vector_store_check(monkeypatch, tmp_path):
     assert server.vector_store_report(paths) == [
         "vector store check failed (ValueError: no such collection); vector search will be off when it "
         "fails the same way at query time"]
+
+
+# -- CLI output encoding --------------------------------------------------------
+
+class _GbkStdout(io.TextIOWrapper):
+    """stdout as on a Chinese-language Windows: GBK (code page 936), strict errors."""
+
+    def __init__(self, tty: bool):
+        super().__init__(io.BytesIO(), encoding="gbk", errors="strict", newline="\n")
+        self._tty = tty
+        self.reconfigured: list[dict] = []
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def reconfigure(self, **kw):
+        self.reconfigured.append(kw)
+        super().reconfigure(**kw)
+
+    def written(self) -> bytes:
+        self.flush()
+        return self.buffer.getvalue()
+
+
+# Curly quotes and CJK exist in GBK; the no-break space U+00A0 does not.
+RESULT = "### “Wall.Create” 创建墙"
+
+
+@pytest.mark.parametrize("command", ["search", "environment"])
+@pytest.mark.parametrize("tty", [True, False], ids=["console", "redirected"])
+def test_cli_output_keeps_the_console_encoding(monkeypatch, command, tty):
+    """On a console the output keeps the console's encoding (characters it
+    cannot show become "?"); redirected or piped, it is UTF-8."""
+    import dataclasses
+
+    from revit_api_docs import environment
+
+    out = _GbkStdout(tty)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(server, "_configure_logging", lambda verbose: None)
+    if command == "search":
+        monkeypatch.setattr(server._state, "prepare", lambda: object())
+        monkeypatch.setattr(server, "search_api", lambda retriever, query, top_k: RESULT)
+        argv, text = ["search", "wall"], RESULT + "\n"
+    else:
+        note = dataclasses.replace(environment.load_notes()[0], id="n", text=RESULT, tags=("t",),
+                                   source="s", revit=environment.RevitRange.parse("*"))
+        monkeypatch.setattr(environment, "select", lambda revit: [note])
+        argv, text = ["environment"], f"[n] any Revit release | tags: t\n  {RESULT}\n  source: s\n\n"
+    assert server.main(argv) == 0
+    assert out.written() == (text.encode("gbk", errors="replace") if tty else text.encode("utf-8"))
+    assert out.reconfigured == [{"errors": "replace"} if tty else {"encoding": "utf-8", "errors": "replace"}]
+
+
+def test_serve_never_touches_stdout(recorded_run, monkeypatch):
+    out = _GbkStdout(tty=False)
+    monkeypatch.setattr(sys, "stdout", out)
+    assert server.main(["serve"]) == 0
+    assert out.reconfigured == [] and out.written() == b""
 
 
 # -- CLI subcommands --------------------------------------------------------
