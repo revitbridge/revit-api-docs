@@ -36,7 +36,7 @@ uvx --from . revit-api-docs search "Wall.Create"   # installs the data set on fi
   connection, no model calls except the optional embedding/rerank requests.
 - Runtime configuration comes from environment variables only; `default_config.yaml` holds no secrets,
   and the pipeline reads keys from the environment (`.env` is git-ignored).
-- The data set is a GitHub Release (`v1.0-data`), never committed. Changing a data file means a new
+- The data set is a GitHub Release (`v1.1-data`), never committed. Changing a data file means a new
   release tag and new entries in `data.ARTIFACTS`.
 - stdout is the MCP transport: log to stderr only.
 - No `sys.path` manipulation, no imports from other repositories. Files copied from the old
