@@ -79,10 +79,12 @@ rerank:
       batch_size: 30        # documents per request (at most 30)
       max_concurrency: 2    # requests in flight per process
       max_retries: 2        # on 429 / 529 / 5xx / timeouts, exponential backoff
-      timeout: 20           # seconds per request
+      timeout: 20           # seconds per request (cut to what is left of retrieval.time_budget)
 
 # --- Retrieval ---
 retrieval:
+  time_budget: 30      # seconds per search for the optional embedding + rerank calls;
+                       # keyword results come back when it is spent
   api:
     top_k: 30          # candidates fetched before rerank
     rerank_top_n: 15   # default number returned

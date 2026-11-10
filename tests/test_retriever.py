@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -186,11 +187,134 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
         assert results.api_items[0].name == "Wall.Create Method"
         assert results.sdk_items[0].project == "CreateWall"
     assert "vector search failed" in caplog.text
-    assert r._embedder is None and "disabled for this process" in caplog.text
+    assert "vector search paused for 300 s after 3 consecutive failures" in caplog.text
     assert _BrokenEmbedder.calls == 3
-    # fourth query: keyword only, no further embedding attempts
+    # fourth query (within the cool-down): keyword only, no further embedding attempts
     r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False)
     assert _BrokenEmbedder.calls == 3
+
+
+class _FlakyEmbedder:
+    def __init__(self):
+        self.calls = 0
+        self.fail = True
+
+    def embed_query(self, query):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("503 upstream unavailable")
+        return [0.0, 0.0]
+
+
+def test_vector_search_pauses_after_failures_and_tries_again(vector_retriever, caplog):
+    """Three failures in a row pause the vector step for VECTOR_COOLDOWN
+    seconds (one log line); the first query after it tries again (one log
+    line); a failure then pauses it again at once, a success resets the count."""
+    from revit_api_docs.retriever import VECTOR_COOLDOWN
+
+    r = vector_retriever
+    emb = _FlakyEmbedder()
+    r._embedder = emb
+    now = [1000.0]
+    r._clock = lambda: now[0]
+    caplog.set_level(logging.INFO, logger="revit_api_docs.retriever")
+
+    def search():
+        res = r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False)
+        assert res.api_items[0].name == "Wall.Create Method"   # keyword results throughout
+        return res
+
+    for _ in range(3):
+        search()
+    assert emb.calls == 3 and caplog.text.count("vector search paused for 300 s") == 1
+    now[0] += VECTOR_COOLDOWN - 1
+    search()
+    assert emb.calls == 3                       # still paused
+    now[0] += 1
+    search()                                    # cool-down over: one try, fails, paused again
+    assert emb.calls == 4
+    assert caplog.text.count("cool-down over") == 1 and caplog.text.count("vector search paused for") == 2
+    search()
+    assert emb.calls == 4
+
+    now[0] += VECTOR_COOLDOWN
+    emb.fail = False
+    queries = len(r._api_collection.queries)
+    search()
+    assert emb.calls == 5 and len(r._api_collection.queries) == queries + 1   # vectors used again
+    assert r.vector_search_enabled is True
+    emb.fail = True
+    search()                                    # one failure after a success does not pause
+    search()
+    assert emb.calls == 7 and caplog.text.count("vector search paused for") == 2
+
+
+class _BlockedEmbedder:
+    """An embedding request that hangs (a blocked host) until released."""
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.calls = 0
+
+    def embed_query(self, query):
+        self.calls += 1
+        self.release.wait(10)
+        raise RuntimeError("connection reset")
+
+
+def test_a_hanging_embedding_call_is_cut_at_the_time_budget(vector_retriever, caplog):
+    import time
+
+    r = vector_retriever
+    emb = _BlockedEmbedder()
+    r._embedder = emb
+    r._time_budget = 1.5
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    t0 = time.monotonic()
+    try:
+        res = r.search("Wall.Create", api_top_k=3, code_top_k=1, rewrite=False, rerank=True)
+    finally:
+        emb.release.set()
+    assert time.monotonic() - t0 < 3.0
+    assert res.api_items[0].name == "Wall.Create Method" and res.sdk_items[0].project == "CreateWall"
+    assert emb.calls == 1 and r._embed_failures == 1
+    assert "vector search failed (StepTimeout:" in caplog.text and "time budget" in caplog.text
+
+
+def test_the_time_budget_comes_from_the_config(tiny_dbs, monkeypatch, tmp_path, caplog):
+    from revit_api_docs.retriever import DEFAULT_TIME_BUDGET
+
+    api_db, sdk_db = tiny_dbs
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = cfgmod.load_config()
+    assert cfg["retrieval"]["time_budget"] == DEFAULT_TIME_BUDGET == 30.0
+
+    def budget(value):
+        cfg["retrieval"]["time_budget"] = value
+        return RAGRetriever(cfg, str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))._time_budget
+
+    assert budget(12) == 12.0 and budget("45") == 45.0
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    for bad in ("abc", 0, -5, float("nan")):
+        assert budget(bad) == DEFAULT_TIME_BUDGET
+    assert "retrieval.time_budget" in caplog.text
+
+
+def test_the_embedding_request_timeout_default_is_10_seconds(monkeypatch):
+    from revit_api_docs.embedder.providers.openai import OpenAIEmbedding
+
+    monkeypatch.setenv("REVIT_API_DOCS_EMBEDDING_API_KEY", "test-embedding-key")
+    emb = OpenAIEmbedding(api_key_env="REVIT_API_DOCS_EMBEDDING_API_KEY")
+    try:
+        assert emb._client.timeout == 10.0 and emb._client.max_retries == 1
+    finally:
+        emb.close()
+    emb = OpenAIEmbedding(api_key_env="REVIT_API_DOCS_EMBEDDING_API_KEY", timeout=25)   # config key still honoured
+    try:
+        assert emb._client.timeout == 25
+    finally:
+        emb.close()
 
 
 def test_an_embedding_provider_that_cannot_be_built_degrades(tiny_dbs, monkeypatch, tmp_path, caplog):

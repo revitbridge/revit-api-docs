@@ -624,6 +624,89 @@ def test_an_empty_jev_answer_falls_back_to_cohere(tiny_dbs, tmp_path, monkeypatc
     assert not res.abstained   # abstention needs Jev's scores; an empty list is not "nothing relevant"
 
 
+def test_a_slow_reranker_is_cut_at_the_time_budget(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    """A host that does not answer: the search returns the retrieval order
+    when the budget is spent instead of waiting for every attempt."""
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        release.wait(3)
+        return httpx.Response(504, text="gateway timeout")
+
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(httpx.MockTransport(handler))])
+    r._time_budget = 1.5
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    t0 = time.monotonic()
+    try:
+        res = r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    finally:
+        release.set()
+    assert time.monotonic() - t0 < 2.9   # one blocked attempt alone takes 3 s
+    expected = plain.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert "rerank provider jev did not answer within" in caplog.text and "time budget" in caplog.text
+
+
+def test_no_rerank_starts_when_the_budget_is_spent(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    calls: list = []
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(jev_transport(lambda d: 0.9, calls))])
+    clock = iter([0.0, 100.0, 100.0, 100.0, 100.0])
+    r._clock = lambda: next(clock, 100.0)   # the budget is spent before the rerank step
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert calls == [] and res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert len(res.api_items) == 3 and "no time left in the 30 s search time budget" in caplog.text
+
+
+def test_jev_requests_and_retries_stay_within_the_deadline(jev_key):
+    from revit_api_docs.reranker import request_deadline
+
+    timeouts: list[float] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(529, text="busy")
+
+    r = JevReranker(transport=httpx.MockTransport(handler), sleep=sleeps.append)
+    with request_deadline(time.monotonic() + 0.3):
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.3 + 1e-6   # request timeout cut to the time left
+    assert sleeps == []   # a 0.5 s backoff would end after the deadline: no retry
+
+    with request_deadline(time.monotonic() - 1):   # already spent: no request at all
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 1
+
+    timeouts.clear()   # no deadline: the configured timeout and retries, as before
+    with pytest.raises(RerankError, match="3 attempts"):
+        r.rerank("q", ["a"], strict=True)
+    assert timeouts == [20.0, 20.0, 20.0] and sleeps == [0.5, 1.0]
+
+
+def test_cohere_request_timeout_is_cut_to_the_deadline(cohere_key):
+    from revit_api_docs.reranker import request_deadline
+
+    timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.5}]})
+
+    r = Reranker(transport=httpx.MockTransport(handler))
+    with request_deadline(time.monotonic() + 0.3):
+        assert [x.index for x in r.rerank("q", ["a"], strict=True)] == [0]
+    with request_deadline(time.monotonic() - 1):
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 2 and 0 < timeouts[0] <= 0.3 + 1e-6 and timeouts[1] == COHERE_TIMEOUT
+
+
 class _BuggyProvider:
     """A provider with a programming error: raises neither RerankError nor an HTTP error."""
 

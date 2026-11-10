@@ -24,7 +24,10 @@ first call, reused afterwards so the TLS setup is paid once) whose idle
 connections stay open for 5 minutes (httpx closes them after 5 s by
 default); `close()` releases it. With strict=False a failure returns the
 input order (the historical Cohere behaviour); with strict=True it raises
-RerankError so the caller can try the next provider. `create_rerank_chain`
+RerankError so the caller can try the next provider. Inside
+`request_deadline(t)` the calls a thread makes end by t: request timeouts are
+cut to the time left and no retry starts that would end later (the retriever
+sets it from its per-search time budget). `create_rerank_chain`
 returns the providers to try in order for the provider `configured_provider`
 resolves: [jev, cohere] for "jev" (Cohere only when its key is set), [cohere]
 for "cohere", [] for "none" or when no key is set.
@@ -43,6 +46,7 @@ Configured in default_config.yaml:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -50,7 +54,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import httpx
 
@@ -69,6 +73,40 @@ PROVIDERS = ("auto", "cohere", "jev", "none")
 # Cohere request timeout. 10 s timed out on 8 of 688 calls in an evaluation
 # run (p95 latency 1.5-2.4 s); 20 s, the same as Jev.
 COHERE_TIMEOUT = 20.0
+
+# Deadline (time.monotonic()) of the rerank calls made by the current thread,
+# set by the retriever from the search's time budget (request_deadline).
+_DEADLINE = threading.local()
+
+
+@contextlib.contextmanager
+def request_deadline(deadline: float | None) -> Iterator[None]:
+    """Rerank calls this thread makes inside the block end by `deadline`.
+
+    Each request's timeout is cut to the time left, no retry starts when its
+    backoff would end after the deadline, and with no time left no request
+    is sent (RerankError). None: the configured timeouts and retries only.
+    """
+    previous = getattr(_DEADLINE, "value", None)
+    _DEADLINE.value = deadline
+    try:
+        yield
+    finally:
+        _DEADLINE.value = previous
+
+
+def _current_deadline() -> float | None:
+    return getattr(_DEADLINE, "value", None)
+
+
+def _time_left(deadline: float | None) -> float | None:
+    """Seconds until `deadline`; RerankError when it has passed; None without one."""
+    if deadline is None:
+        return None
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise RerankError("no time left in the search time budget")
+    return left
 
 
 @dataclass
@@ -225,6 +263,8 @@ class Reranker(RerankProvider):
 
     def _call(self, query: str, documents: list[str], top_n: int) -> list[RerankResult]:
         t0 = time.monotonic()
+        left = _time_left(_current_deadline())
+        request_kw = {} if left is None else {"timeout": min(COHERE_TIMEOUT, left)}
         try:
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
@@ -238,7 +278,7 @@ class Reranker(RerankProvider):
                 "return_documents": False,
             }
 
-            resp = self._http.get().post(_COHERE_RERANK_URL, headers=headers, json=payload)
+            resp = self._http.get().post(_COHERE_RERANK_URL, headers=headers, json=payload, **request_kw)
             resp.raise_for_status()
             data = resp.json()
 
@@ -393,23 +433,25 @@ class JevReranker(RerankProvider):
 
     def _score(self, query: str, documents: list[str]) -> list[float]:
         q = self.query_text(query)
+        deadline = _current_deadline()   # read here: the batch threads below do not see it
         bs = self._batch_size
         batches = [documents[i:i + bs] for i in range(0, len(documents), bs)]
         client = self._http.get()
         if len(batches) == 1:
-            per_batch = [self._score_batch(client, q, batches[0])]
+            per_batch = [self._score_batch(client, q, batches[0], deadline)]
         else:
             workers = min(self._max_concurrency, len(batches))
             with ThreadPoolExecutor(max_workers=workers,
                                     thread_name_prefix="revit-api-docs-jev") as pool:
-                per_batch = list(pool.map(lambda b: self._score_batch(client, q, b), batches))
+                per_batch = list(pool.map(lambda b: self._score_batch(client, q, b, deadline), batches))
         return [s for batch in per_batch for s in batch]
 
     def close(self) -> None:
         """Close the HTTP client; the next score() opens a new one."""
         self._http.close()
 
-    def _score_batch(self, client: httpx.Client, query: str, docs: list[str]) -> list[float]:
+    def _score_batch(self, client: httpx.Client, query: str, docs: list[str],
+                     deadline: float | None = None) -> list[float]:
         ids = [f"d{i}" for i in range(len(docs))]
         payload = {
             "model": self._model,
@@ -426,7 +468,7 @@ class JevReranker(RerankProvider):
                 for qid in ids
             },
         }
-        data = self._post(client, payload)
+        data = self._post(client, payload, deadline)
         answers = data.get("answers") if isinstance(data, dict) else None
         if not isinstance(answers, dict):
             raise RerankError("response has no answers object")
@@ -440,7 +482,8 @@ class JevReranker(RerankProvider):
             scores.append(float(value))
         return scores
 
-    def _post(self, client: httpx.Client, payload: dict[str, Any]) -> Any:
+    def _post(self, client: httpx.Client, payload: dict[str, Any], deadline: float | None = None) -> Any:
+        """POST with retries; with a deadline (request_deadline) every wait ends by it."""
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -448,9 +491,15 @@ class JevReranker(RerankProvider):
         attempt = 0
         while True:
             retry_after: float | None = None
+            left = _time_left(deadline)
+            request_kw = {} if left is None else {"timeout": min(self._timeout, left)}
+            if not self._slots.acquire(timeout=left):   # None: wait as long as it takes
+                raise RerankError("no free request slot within the search time budget")
             try:
-                with self._slots:
-                    resp = client.post(self._url, headers=headers, json=payload)
+                try:
+                    resp = client.post(self._url, headers=headers, json=payload, **request_kw)
+                finally:
+                    self._slots.release()
             except httpx.TransportError as e:   # connect errors and timeouts
                 error = f"{type(e).__name__}: {e}"
             else:
@@ -465,9 +514,13 @@ class JevReranker(RerankProvider):
                 retry_after = _retry_after_seconds(resp)
             if attempt >= self._max_retries:
                 raise RerankError(f"{error} (gave up after {attempt + 1} attempts)")
-            delay = retry_after if retry_after is not None else self._backoff * (2 ** attempt)
+            delay = min(retry_after if retry_after is not None else self._backoff * (2 ** attempt),
+                        _JEV_MAX_BACKOFF)
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise RerankError(f"{error} (no time left in the search time budget for retry "
+                                  f"{attempt + 1}/{self._max_retries})")
             _log.info(f"[rerank:jev] {error}; retry {attempt + 1}/{self._max_retries} in {delay:.1f}s")
-            self._sleep(min(delay, _JEV_MAX_BACKOFF))
+            self._sleep(delay)
             attempt += 1
 
 

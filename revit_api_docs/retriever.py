@@ -51,10 +51,20 @@ Degraded modes (no network keys needed for the MCP server to be useful):
                                (BM25 over an SQLite FTS5 index, see bm25.py;
                                the LIKE scorer when FTS5 is missing).
     - Vector store fails the consistency probe -> keyword search only.
+    - Vector step fails     -> keyword search for that query; after
+                               VECTOR_FAILURES_BEFORE_COOLDOWN failures in a row
+                               the vector step is skipped for VECTOR_COOLDOWN
+                               seconds, then tried again.
     - No rerank API key     -> results keep the fused (or keyword) order.
     - Jev call fails        -> Cohere reranks when its key is set, else no rerank;
                                SearchResults.rerank_used says which one ran.
     - No LLM key            -> query rewriting is skipped.
+
+Time budget: the optional network steps of one search (the embedding request,
+the rerank calls) end within retrieval.time_budget seconds (default
+DEFAULT_TIME_BUDGET) of its start. A step still running then is abandoned (it
+ends in the background at its own timeout) and the search answers with what it
+has, keyword results at least; rerank requests are also cut to the time left.
 
 Abstention: with rerank provider "jev" and retrieval.api.min_relevance set,
 the result is marked abstained when no candidate reaches the threshold (the
@@ -67,14 +77,17 @@ never abstain: their scores are not calibrated probabilities.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .bm25 import Bm25Index, fts5_available
 from .prompts import load_prompt
@@ -95,6 +108,58 @@ PROBE_SAMPLE = 50     # records sampled per collection
 PROBE_BLOCKS = 10     # read as 10 runs of consecutive records spread over the collection
 PROBE_ALIGNED = 0.9   # below this share of sampled ids naming their row's entry: misaligned
 PROBE_USABLE = 0.5    # below this share of sampled names found in SQLite: unusable
+
+# Seconds from the start of a search within which its optional network steps
+# (embedding, rerank) must end (config retrieval.time_budget). MCP clients
+# commonly cancel a tool call after 60 s; keyword search and the local vector
+# query come on top of this.
+DEFAULT_TIME_BUDGET = 30.0
+# A network step is not started with less than this left of the budget.
+MIN_STEP_SECONDS = 0.5
+# Consecutive failures of the vector step (embedding API, vector store) after
+# which it is skipped for VECTOR_COOLDOWN seconds; the first query after that
+# tries it again.
+VECTOR_FAILURES_BEFORE_COOLDOWN = 3
+VECTOR_COOLDOWN = 300.0
+
+
+class StepTimeout(Exception):
+    """An optional network step did not finish within the search's time budget."""
+
+
+def run_with_time_limit(fn: Callable[[], Any], seconds: float, what: str) -> Any:
+    """Return fn(), or raise what it raised, or StepTimeout after `seconds`.
+
+    fn runs in a daemon thread. One that overruns is left to finish on its
+    own (the HTTP clients' timeouts end it) and its result is dropped; the
+    caller goes on at once.
+    """
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as e:   # handed to the caller below
+            box["error"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=target, name="revit-api-docs-step", daemon=True).start()
+    if not done.wait(max(seconds, 0.0)):
+        raise StepTimeout(f"{what} did not answer within the {seconds:.1f} s left of the search "
+                          "time budget")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _rerank_by(provider: Any, query: str, documents: list[str], top_n: int, seconds: float) -> Any:
+    """provider.rerank (strict) with its requests ending within `seconds`."""
+    from .reranker import request_deadline
+
+    with request_deadline(time.monotonic() + seconds):
+        return provider.rerank(query, documents, top_n=top_n, strict=True)
 
 
 @dataclass
@@ -416,6 +481,8 @@ class RAGRetriever:
         self._code_top_k = ret_cfg.get("code", {}).get("top_k", 5)
         self._code_rerank_n = ret_cfg.get("code", {}).get("rerank_top_n", 3)
         self._min_relevance = self._parse_min_relevance(ret_cfg.get("api", {}).get("min_relevance"))
+        self._time_budget = self._parse_time_budget(ret_cfg.get("time_budget"))
+        self._clock: Callable[[], float] = time.monotonic   # budget and cool-down clock (tests replace it)
         self._revit_version = str(config.get("revit_version", "2026"))
 
         # ChromaDB collections are opened on the first vector query (see
@@ -483,10 +550,12 @@ class RAGRetriever:
         self._vector_off: str | None = None   # why the probe switched vector search off
         self._probe_lock = threading.Lock()
 
-        # Vector search is switched off for the process after this many
-        # consecutive embedding/index failures (expired key, unreachable API).
+        # Consecutive failures of the vector step (expired key, unreachable or
+        # slow API, ...); from VECTOR_FAILURES_BEFORE_COOLDOWN on, the step is
+        # skipped until _vector_paused_until (see _vector_step_due).
         self._embed_failures = 0
-        self._max_embed_failures = 3
+        self._vector_paused_until: float | None = None
+        self._vector_state_lock = threading.Lock()
 
         # Query rewriting LLM (lazy init; stays None after a failed init)
         self._rewrite_client = None
@@ -585,6 +654,54 @@ class RAGRetriever:
             return None
         return threshold
 
+    def _parse_time_budget(self, value: Any) -> float:
+        """retrieval.time_budget: seconds > 0; unset or invalid -> DEFAULT_TIME_BUDGET."""
+        if value is None:
+            return DEFAULT_TIME_BUDGET
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            seconds = math.nan
+        if not math.isfinite(seconds) or seconds <= 0:
+            self._log.warning(f"retrieval.time_budget={value!r} is not a positive number of seconds; "
+                              f"using {DEFAULT_TIME_BUDGET:g}")
+            return DEFAULT_TIME_BUDGET
+        return seconds
+
+    def _vector_step_due(self) -> bool:
+        """False while the vector step is paused after repeated failures.
+
+        The first call after the cool-down clears it (logged once) and lets
+        one query try again; _vector_step_failed pauses again at once if that
+        try fails too.
+        """
+        with self._vector_state_lock:
+            until = self._vector_paused_until
+            if until is None:
+                return True
+            if self._clock() < until:
+                return False
+            self._vector_paused_until = None
+        self._log.info("vector search: cool-down over, trying the vector step again")
+        return True
+
+    def _vector_step_failed(self, error: Exception) -> None:
+        self._log.warning(f"vector search failed ({type(error).__name__}: {str(error)[:200]}); "
+                          "using keyword search for this query")
+        with self._vector_state_lock:
+            self._embed_failures += 1
+            failures = self._embed_failures
+            pause = (failures >= VECTOR_FAILURES_BEFORE_COOLDOWN and self._vector_paused_until is None)
+            if pause:
+                self._vector_paused_until = self._clock() + VECTOR_COOLDOWN
+        if pause:
+            self._log.warning(f"vector search paused for {VECTOR_COOLDOWN:.0f} s after {failures} "
+                              "consecutive failures; keyword search only until then")
+
+    def _vector_step_succeeded(self) -> None:
+        with self._vector_state_lock:
+            self._embed_failures = 0
+
     def _detect_sdk_schema(self) -> bool:
         """Check if sdk_db uses the new sdk_info table."""
         return _sdk_schema_is_new(self._sdk_db)
@@ -674,9 +791,12 @@ class RAGRetriever:
         `rerank=None` follows `rewrite` (the historical fast/full switch); pass
         `rerank=True` with `rewrite=False` to rerank without an LLM rewrite.
         Pass 0 as a top_k to skip that source entirely.
+
+        The embedding request and the rerank calls end within the time budget
+        (retrieval.time_budget seconds from now); see the module docstring.
         """
-        import time as _time
-        t0 = _time.monotonic()
+        t0 = time.monotonic()
+        deadline = self._clock() + self._time_budget
 
         # Use config defaults if not specified (0 means "none of this source")
         final_api_n = self._api_rerank_n if api_top_k is None else api_top_k
@@ -691,23 +811,29 @@ class RAGRetriever:
 
         # Tier 0: Query rewriting
         search_query = self.rewrite_query(query) if rewrite else query
-        t_rewrite = _time.monotonic() - t0
+        t_rewrite = time.monotonic() - t0
 
-        # Tier 1: Embedding + Vector search (skipped without an embedding key or
-        # when the consistency probe switched it off; a failing embedding API
-        # degrades to keyword search instead of erroring)
+        # Tier 1: Embedding + Vector search (skipped without an embedding key,
+        # when the consistency probe switched it off, or during the cool-down
+        # after repeated failures; a failing or slow embedding API degrades to
+        # keyword search instead of erroring)
         api_items: list[RetrievedItem] = []
         vec_items: list[RetrievedItem] = []
         sdk_items: list[RetrievedItem] = []
         t_embed = 0.0
         vector_ok = False
-        if self.vector_search_enabled:
+        if self.vector_search_enabled and self._vector_step_due():
             try:
                 self._open_collections()
                 self._check_vector_stores()   # first vector query only; may switch vectors off
                 if self._vector_off is None:
-                    query_embedding = self._embedder.embed_query(search_query)
-                    t_embed = _time.monotonic() - t0 - t_rewrite
+                    left = deadline - self._clock()
+                    if left < MIN_STEP_SECONDS:
+                        raise StepTimeout(f"no time left in the {self._time_budget:g} s search time budget")
+                    query_embedding = run_with_time_limit(
+                        functools.partial(self._embedder.embed_query, search_query), left,
+                        "the embedding API")
+                    t_embed = time.monotonic() - t0 - t_rewrite
 
                     if retrieve_api_k > 0:
                         api_raw = self._api_collection.query(
@@ -724,21 +850,15 @@ class RAGRetriever:
                         )
                         sdk_items = self._hydrate_sdk(code_raw)
                     vector_ok = True
-                self._embed_failures = 0
+                self._vector_step_succeeded()
             except Exception as e:
-                self._embed_failures += 1
-                self._log.warning(f"vector search failed ({type(e).__name__}: {str(e)[:200]}); "
-                                  "using keyword search for this query")
-                if self._embed_failures >= self._max_embed_failures:
-                    self._log.warning("vector search disabled for this process after "
-                                      f"{self._embed_failures} consecutive failures")
-                    self._embedder = None
+                self._vector_step_failed(e)
                 vec_items, sdk_items = [], []
         if not vector_ok and final_code_n > 0:
             sdk_items = self._keyword_search_sdk(query, limit=final_code_n)
 
         # Tier 2: Hydrate from SQLite (done above per source)
-        t_hydrate = _time.monotonic() - t0 - t_rewrite - t_embed
+        t_hydrate = time.monotonic() - t0 - t_rewrite - t_embed
 
         # Tier 2.5: BM25 keyword search on SQLite, to the same depth as the
         # vector search (top_k when reranking, else the requested count). With
@@ -770,7 +890,7 @@ class RAGRetriever:
         if chain and api_items:
             from .reranker import RerankError
 
-            t_rr_start = _time.monotonic()
+            t_rr_start = time.monotonic()
             # Build document texts for reranking
             api_docs = []
             for item in api_items:
@@ -781,8 +901,20 @@ class RAGRetriever:
 
             for provider in chain:
                 nxt = "trying the next one" if provider is not chain[-1] else "keeping the retrieval order"
+                left = deadline - self._clock()
+                if left < MIN_STEP_SECONDS:
+                    self._log.warning(f"[search] no time left in the {self._time_budget:g} s search time "
+                                      f"budget for rerank provider {provider.name}; {nxt}")
+                    rerank_skipped.append(provider.name)
+                    continue
                 try:
-                    reranked = provider.rerank(query, api_docs, top_n=final_api_n, strict=True)
+                    reranked = run_with_time_limit(
+                        functools.partial(_rerank_by, provider, query, api_docs, final_api_n, left),
+                        left, f"rerank provider {provider.name}")
+                except StepTimeout as e:
+                    self._log.warning(f"[search] {e}; {nxt}")
+                    rerank_skipped.append(provider.name)
+                    continue
                 except RerankError as e:
                     self._log.warning(f"[search] rerank provider {provider.name} failed ({e}); {nxt}")
                     rerank_skipped.append(provider.name)
@@ -829,7 +961,7 @@ class RAGRetriever:
                         abstained = True
                         abstain_reason = f"best relevance {best:.2f} < {self._min_relevance:.2f}"
                 break
-            t_rerank = _time.monotonic() - t_rr_start
+            t_rerank = time.monotonic() - t_rr_start
             self._log.info(f"[search] rerank={rerank_used} {len(api_docs)} -> {len(api_items)} "
                            f"in {t_rerank:.2f}s"
                            + (f" abstained ({abstain_reason})" if abstained else ""))
@@ -839,7 +971,7 @@ class RAGRetriever:
 
         sdk_items = sdk_items[:final_code_n]
 
-        elapsed = _time.monotonic() - t0
+        elapsed = time.monotonic() - t0
         self._log.info(
             f"[search] query={query[:40]!r} rewrite={t_rewrite:.2f}s "
             f"embed={t_embed:.2f}s hydrate={t_hydrate:.2f}s "
