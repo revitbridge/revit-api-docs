@@ -263,6 +263,15 @@ def test_cli_output_keeps_the_console_encoding(monkeypatch, command, tty):
     assert out.reconfigured == [{"errors": "replace"} if tty else {"encoding": "utf-8", "errors": "replace"}]
 
 
+def test_output_setup_survives_a_closed_stdout(monkeypatch):
+    out = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+    out.close()
+    monkeypatch.setattr(sys, "stdout", out)
+    server._prepare_text_stdout()   # never fails the CLI before it has printed anything
+    monkeypatch.setattr(sys, "stdout", None)   # pythonw: no stdout at all
+    server._prepare_text_stdout()
+
+
 def test_serve_never_touches_stdout(recorded_run, monkeypatch):
     out = _GbkStdout(tty=False)
     monkeypatch.setattr(sys, "stdout", out)

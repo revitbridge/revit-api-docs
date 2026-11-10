@@ -397,10 +397,13 @@ def _prepare_text_stdout() -> None:
         console = bool(out.isatty())
     except (AttributeError, ValueError):
         console = False
-    if console:
-        reconfigure(errors="replace")
-    else:
-        reconfigure(encoding="utf-8", errors="replace")
+    try:
+        if console:
+            reconfigure(errors="replace")
+        else:
+            reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):   # a closed or detached stdout: leave it as it is
+        pass
 
 
 def _print_environment(query: str, revit) -> int:
