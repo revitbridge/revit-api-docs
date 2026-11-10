@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The `pipeline` extra declares `striprtf` (`>=0.0.23`). The SDK extraction
+  (`pipeline/sdk_parser/extract.py`) converts RTF readmes with it and, when it
+  was missing, silently fell back to a regex that keeps `\'xx` escapes and
+  drops paragraph breaks. Runtime dependencies are unchanged.
+
 ## [0.3.0] - 2026-10-26
 
 Vector hits now come back as the entries they describe and count also
