@@ -317,6 +317,30 @@ def _remove_leftovers(root: Path) -> None:
                     _remove(leftover)
 
 
+def _restore_interrupted_swaps(root: Path) -> None:
+    """Put back the previous copy of a target an install left absent.
+
+    An install stopped between the two renames of _swap_in leaves the target
+    absent and its previous copy as .<name>.old-*. When there is exactly one
+    such copy it is the target's and goes back in place; with several,
+    which one is not known, and they stay until a new copy has been
+    downloaded and verified (then _remove_leftovers removes them).
+    """
+    for art in ARTIFACTS:
+        target = root / art.target
+        if target.exists() or target.is_symlink() or not target.parent.is_dir():
+            continue
+        backups = list(target.parent.glob(f".{target.name}.old-*"))
+        if len(backups) != 1:
+            continue
+        try:
+            _rename(backups[0], target)
+        except OSError as e:
+            log.warning("could not put back %s from %s (%s)", target, backups[0].name, e)
+        else:
+            log.warning("put back %s from %s, left by an interrupted install", target, backups[0].name)
+
+
 def fetch_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> Path:
     """Download `art` into root/downloads (resuming a partial file) and check
     its SHA-256; return the verified file. Nothing in place is touched."""
@@ -472,8 +496,11 @@ def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> N
     are swapped back, so the installed tree stays as it was, and the verified
     downloads stay in root/downloads for the next try.
     """
-    _remove_leftovers(root)
+    _restore_interrupted_swaps(root)
     parts = [fetch_artifact(art, root, progress) for art in todo]
+    # Only now: until every download is verified, a previous copy left by an
+    # interrupted install may be the only copy there is.
+    _remove_leftovers(root)
     staged: list[tuple[Artifact, Path, Path | None]] = []
     swapped: list[tuple[Path, Path, Path | None]] = []   # (target, staged copy, previous copy)
     try:

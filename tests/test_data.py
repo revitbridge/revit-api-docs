@@ -7,6 +7,8 @@ import io
 import json
 import logging
 import os
+import shutil
+import socket
 import sys
 import tarfile
 import threading
@@ -384,6 +386,55 @@ def test_an_upgrade_over_a_really_open_store_keeps_it(fake_release, tmp_path):
         assert isinstance(failed.value, data.DataInUseError)
     p = data.ensure_data(tmp_path)
     assert p.api_db.read_bytes() == payloads["revit_api.db"] and data.missing(tmp_path) == []
+
+
+@pytest.fixture
+def offline_release(monkeypatch):
+    """A release URL nothing listens on, reached without a proxy: every download fails."""
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setenv("REVIT_API_DOCS_RELEASE_URL", f"http://127.0.0.1:{port}/dl")
+
+
+def test_an_interrupted_swap_survives_an_offline_start(offline_release, tmp_path, caplog):
+    """An upgrade killed between the two renames of the vector store left the
+    installed copy only as .chromadb_api.old-*. The next start cannot download:
+    that copy must not be cleaned away first; it is put back."""
+    old = _old_release_tree(tmp_path)
+    store = tmp_path / "chromadb" / "chromadb_api"
+    backup = store.with_name(".chromadb_api.old-4242-1")
+    os.rename(store, backup)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+
+    with pytest.raises(Exception):
+        data.ensure_data(tmp_path)
+
+    after = _tree(tmp_path)
+    for path, content in old.items():
+        assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+    assert not backup.exists() and "put back" in caplog.text
+
+
+def test_several_previous_copies_are_kept_when_the_download_fails(offline_release, tmp_path):
+    """Two previous copies of one absent target: which is the right one is not
+    known, so none is put back, and neither is removed before a new copy is
+    downloaded and verified."""
+    _old_release_tree(tmp_path)
+    store = tmp_path / "chromadb" / "chromadb_api"
+    first, second = store.with_name(".chromadb_api.old-1-1"), store.with_name(".chromadb_api.old-2-2")
+    os.rename(store, first)
+    shutil.copytree(first, second)
+
+    with pytest.raises(Exception):
+        data.ensure_data(tmp_path)
+
+    assert not store.exists()
+    assert _tree(first) == _tree(second) == {"0a1b2c3d/data_level0.bin": b"old hnsw",
+                                             "chroma.sqlite3": b"old api store"}
 
 
 def test_the_server_keeps_working_on_the_installed_tree_when_files_are_in_use(tiny_data_dir, monkeypatch,
