@@ -1,11 +1,15 @@
 """Data directory resolution and the download/verify/extract path, served from a local HTTP server."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import io
 import json
 import logging
+import os
+import shutil
+import socket
 import sys
 import tarfile
 import threading
@@ -22,6 +26,36 @@ def test_data_dir_env_override(monkeypatch, tmp_path):
     p = data.paths()
     assert p.api_db == tmp_path / "custom" / "sqlite" / "revit_api.db"
     assert p.chromadb_api == tmp_path / "custom" / "chromadb" / "chromadb_api"
+
+
+def test_a_relative_data_dir_is_made_absolute(monkeypatch, tmp_path):
+    """A relative REVIT_API_DOCS_DATA_DIR would name a different place for every
+    working directory (each MCP client starts the server in its own)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", os.path.join("rel", "data"))
+    root = data.data_dir()
+    assert root.is_absolute()
+    assert root == Path(os.getcwd()) / "rel" / "data"
+    assert data.paths().api_db == root / "sqlite" / "revit_api.db"
+
+
+def test_a_relative_data_dir_is_pinned_once_at_start_up(monkeypatch, tmp_path, caplog):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", os.path.join("rel", "data"))
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    root = data.pin_data_dir()
+    assert root == Path(os.getcwd()) / "rel" / "data"
+    assert os.environ["REVIT_API_DOCS_DATA_DIR"] == str(root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert data.data_dir() == root   # a later change of directory does not move the data set
+    assert "is relative" in caplog.text and str(root) in caplog.text
+
+    caplog.clear()   # an absolute value (or none) is left alone and logs nothing
+    assert data.pin_data_dir() == root and caplog.text == ""
+    monkeypatch.delenv("REVIT_API_DOCS_DATA_DIR")
+    assert data.pin_data_dir() == data.default_data_dir() and caplog.text == ""
 
 
 def test_default_data_dir_per_platform(monkeypatch):
@@ -57,6 +91,31 @@ def test_missing_trusts_a_manifestless_tree_and_rejects_other_releases(tmp_path)
     assert [a.name for a, _ in data.unexpected_sizes(root)] == ["revit_api.db", "revit_sdk.db"]
     (root / "manifest.json").write_text(json.dumps({"release": "v0.9-data"}), encoding="utf-8")
     assert [a.name for a in data.missing(root)] == [a.name for a in data.ARTIFACTS]
+
+
+def _complete_tree(root: Path) -> None:
+    """Every artifact present (placeholder contents), no manifest."""
+    for art in data.ARTIFACTS:
+        target = root / art.target
+        if art.extract:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "chroma.sqlite3").write_bytes(b"x")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"hand-copied")
+
+
+@pytest.mark.parametrize("text", ["[]", "null", "42", '"v1.1-data"', "{}", '{"release": 5}',
+                                  '{"files": {}}', "not json", chr(0xFEFF) + "{"])
+def test_a_manifest_that_is_not_an_object_with_a_release_counts_as_absent(tmp_path, text):
+    """A manifest.json this installer did not write (a list, null, a number, an
+    object without a release name) is treated as absent: the tree is used as
+    it is instead of failing on every start or being downloaded again."""
+    _complete_tree(tmp_path)
+    (tmp_path / "manifest.json").write_text(text, encoding="utf-8")
+    assert data.missing(tmp_path) == []
+    assert data.read_manifest(tmp_path) is None
+    assert data.ensure_data(tmp_path).root == tmp_path   # no download, no exception
 
 
 # -- progress reporting -------------------------------------------------------
@@ -226,6 +285,342 @@ def test_existing_file_of_another_size_survives_ensure_data(fake_release, tmp_pa
     assert p.sdk_db.read_bytes() == payloads["revit_sdk.db"]
     assert (p.chromadb_api / "chroma.sqlite3").is_file()
     assert "using it as is" in caplog.text and "revit_api.db" in caplog.text
+
+
+# -- upgrading over a tree another process has open ------------------------------
+
+@pytest.fixture
+def open_elsewhere(monkeypatch):
+    """Paths 'open in another process', with Windows semantics on every OS: such
+    a file cannot be deleted, renamed or replaced, and a directory that holds
+    one cannot be renamed or removed. Add paths to the returned set; clear it
+    to 'close' them."""
+    held: set[Path] = set()
+
+    def blocked(path) -> bool:
+        if not held or isinstance(path, int):
+            return False
+        p = Path(os.fspath(path)).resolve()
+        return any(p == h or p in h.parents for h in held)
+
+    def guard(fn, nargs):
+        def inner(*args, **kw):
+            if any(blocked(a) for a in args[:nargs]):
+                raise PermissionError(13, "The process cannot access the file because it is being "
+                                          "used by another process", str(args[0]))
+            return fn(*args, **kw)
+        return inner
+
+    for name, nargs in (("unlink", 1), ("remove", 1), ("rmdir", 1), ("rename", 2), ("replace", 2)):
+        monkeypatch.setattr(os, name, guard(getattr(os, name), nargs))
+    monkeypatch.setattr(data, "RENAME_RETRY_DELAYS", (), raising=False)
+    return held
+
+
+def _old_release_tree(root: Path) -> dict[Path, bytes]:
+    """An installed tree of another release, with a vector segment directory
+    that sorts before chroma.sqlite3 (rmtree reaches it first)."""
+    files = {
+        root / "chromadb" / "chromadb_api" / "0a1b2c3d" / "data_level0.bin": b"old hnsw",
+        root / "chromadb" / "chromadb_api" / "chroma.sqlite3": b"old api store",
+        root / "chromadb" / "chromadb_code" / "chroma.sqlite3": b"old code store",
+        root / "sqlite" / "revit_api.db": b"old api db",
+        root / "sqlite" / "revit_sdk.db": b"old sdk db",
+    }
+    for path, content in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (root / "manifest.json").write_text(json.dumps({"release": "v1.0-data", "files": {}}), encoding="utf-8")
+    return files
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_an_upgrade_over_files_in_use_keeps_the_old_tree(fake_release, tmp_path, open_elsewhere):
+    """The vector store is open in an older server: the new data set is
+    downloaded and verified, nothing of the installed one is removed or
+    replaced, and the next try (files closed) installs it without downloading."""
+    payloads, hits = fake_release
+    old = _old_release_tree(tmp_path)
+    before = {k: v for k, v in _tree(tmp_path).items()}
+    open_elsewhere.add((tmp_path / "chromadb" / "chromadb_api" / "chroma.sqlite3").resolve())
+
+    with pytest.raises(Exception) as failed:
+        data.ensure_data(tmp_path)
+
+    after = _tree(tmp_path)
+    for path, content in old.items():   # complete and unchanged, also the SQLite files swapped before
+        assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+    assert json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["release"] == "v1.0-data"
+    assert isinstance(failed.value, data.DataInUseError)
+    assert "close other revit-api-docs processes and retry" in str(failed.value)
+    kept = sorted(p.name for p in (tmp_path / "downloads").iterdir() if p.name.endswith(".part"))
+    assert kept == sorted(f"{name}.part" for name in payloads)   # verified downloads stay for the retry
+    leftovers = [p for p in tmp_path.rglob(".*") if p.name != data.LOCK_FILENAME]
+    assert leftovers == []   # no staging or backup copies left behind
+    assert {k for k in after if not k.startswith("downloads/")} == set(before) | {data.LOCK_FILENAME}
+
+    open_elsewhere.clear()   # the other server was closed
+    requests = len(hits)
+    p = data.ensure_data(tmp_path)
+    assert len(hits) == requests   # nothing downloaded again
+    assert p.api_db.read_bytes() == payloads["revit_api.db"]
+    assert (p.chromadb_api / "chroma.sqlite3").read_bytes() == b"a"
+    assert not (p.chromadb_api / "0a1b2c3d").exists()   # the old store was replaced as a whole
+    assert data.read_manifest(tmp_path)["release"] == data.RELEASE_TAG and data.missing(tmp_path) == []
+    assert not (tmp_path / "downloads").exists()
+    assert [p for p in tmp_path.rglob(".*") if p.name != data.LOCK_FILENAME] == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows refuses to delete or rename open files")
+def test_an_upgrade_over_a_really_open_store_keeps_it(fake_release, tmp_path):
+    payloads, _ = fake_release
+    old = _old_release_tree(tmp_path)
+    with open(tmp_path / "chromadb" / "chromadb_api" / "chroma.sqlite3", "rb"):   # as an older server holds it
+        with pytest.raises(Exception) as failed:
+            data.ensure_data(tmp_path)
+        after = _tree(tmp_path)
+        for path, content in old.items():
+            assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+        assert isinstance(failed.value, data.DataInUseError)
+    p = data.ensure_data(tmp_path)
+    assert p.api_db.read_bytes() == payloads["revit_api.db"] and data.missing(tmp_path) == []
+
+
+def test_a_previous_copy_that_cannot_be_removed_is_retried_and_reported(fake_release, tmp_path,
+                                                                        monkeypatch, caplog):
+    """The previous vector stores (hundreds of MB) cannot be deleted after a
+    successful upgrade (something still reads them): one more try, then one
+    log line per copy that is still there, with its path."""
+    payloads, _ = fake_release
+    _old_release_tree(tmp_path)
+    tries: dict[str, int] = {}
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        name = Path(path).name
+        if ".old-" in name:   # deleting it fails; ignore_errors=True hides that
+            tries[name.split(".old-")[0]] = tries.get(name.split(".old-")[0], 0) + 1
+            return None
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    p = data.ensure_data(tmp_path)
+
+    assert data.read_manifest(tmp_path)["release"] == data.RELEASE_TAG
+    assert (p.chromadb_api / "chroma.sqlite3").read_bytes() == b"a"
+    assert tries == {".chromadb_api": 2, ".chromadb_code": 2}
+    left = [r.getMessage() for r in caplog.records if "could not remove" in r.getMessage()]
+    assert len(left) == 2
+    assert all(str(tmp_path / "chromadb") in m and "delete it by hand" in m for m in left)
+    assert any(".chromadb_api.old-" in m for m in left) and any(".chromadb_code.old-" in m for m in left)
+
+
+def test_a_failed_manifest_write_rolls_the_install_back(fake_release, tmp_path, monkeypatch):
+    """Disk full while writing the manifest after the swaps: the tree goes
+    back to the release its manifest names, and the verified downloads stay,
+    so the next start installs without downloading again."""
+    payloads, hits = fake_release
+    old = _old_release_tree(tmp_path)
+    real_write = data.write_manifest
+
+    def disk_full(root, installed=()):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(data, "write_manifest", disk_full)
+    with pytest.raises(OSError, match="No space left"):
+        data.ensure_data(tmp_path)
+
+    after = _tree(tmp_path)
+    for path, content in old.items():
+        assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+    assert json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["release"] == "v1.0-data"
+    kept = sorted(p.name for p in (tmp_path / "downloads").iterdir())
+    assert kept == sorted(f"{name}.part" for name in payloads)
+
+    monkeypatch.setattr(data, "write_manifest", real_write)
+    requests = len(hits)
+    p = data.ensure_data(tmp_path)
+    assert len(hits) == requests and p.api_db.read_bytes() == payloads["revit_api.db"]
+    assert data.read_manifest(tmp_path)["release"] == data.RELEASE_TAG and data.missing(tmp_path) == []
+
+
+def test_the_manifest_is_replaced_whole_or_not_at_all(fake_release, tmp_path, monkeypatch):
+    """A write that fails halfway leaves the previous manifest as it was (an
+    unreadable one would count as no manifest: the old release used as is)."""
+    _old_release_tree(tmp_path)
+    before = (tmp_path / "manifest.json").read_bytes()
+    real_write_text = Path.write_text
+
+    def half_then_full(self, text, *args, **kwargs):
+        if "manifest" in self.name:
+            real_write_text(self, text[:len(text) // 2], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write_text(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", half_then_full)
+    with pytest.raises(OSError, match="No space left"):
+        data.write_manifest(tmp_path)
+    assert (tmp_path / "manifest.json").read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["chromadb", "manifest.json", "sqlite"]
+
+
+@pytest.fixture
+def offline_release(monkeypatch):
+    """A release URL nothing listens on, reached without a proxy: every download fails."""
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setenv("REVIT_API_DOCS_RELEASE_URL", f"http://127.0.0.1:{port}/dl")
+
+
+def test_an_interrupted_swap_survives_an_offline_start(offline_release, tmp_path, caplog):
+    """An upgrade killed between the two renames of the vector store left the
+    installed copy only as .chromadb_api.old-*. The next start cannot download:
+    that copy must not be cleaned away first; it is put back."""
+    old = _old_release_tree(tmp_path)
+    store = tmp_path / "chromadb" / "chromadb_api"
+    backup = store.with_name(".chromadb_api.old-4242-1")
+    os.rename(store, backup)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+
+    with pytest.raises(Exception):
+        data.ensure_data(tmp_path)
+
+    after = _tree(tmp_path)
+    for path, content in old.items():
+        assert after.get(path.relative_to(tmp_path).as_posix()) == content, path
+    assert not backup.exists() and "put back" in caplog.text
+
+
+def test_several_previous_copies_are_kept_when_the_download_fails(offline_release, tmp_path):
+    """Two previous copies of one absent target: which is the right one is not
+    known, so none is put back, and neither is removed before a new copy is
+    downloaded and verified."""
+    _old_release_tree(tmp_path)
+    store = tmp_path / "chromadb" / "chromadb_api"
+    first, second = store.with_name(".chromadb_api.old-1-1"), store.with_name(".chromadb_api.old-2-2")
+    os.rename(store, first)
+    shutil.copytree(first, second)
+
+    with pytest.raises(Exception):
+        data.ensure_data(tmp_path)
+
+    assert not store.exists()
+    assert _tree(first) == _tree(second) == {"0a1b2c3d/data_level0.bin": b"old hnsw",
+                                             "chroma.sqlite3": b"old api store"}
+
+
+def test_the_server_keeps_working_on_the_installed_tree_when_files_are_in_use(tiny_data_dir, monkeypatch,
+                                                                              no_key_env, caplog):
+    from revit_api_docs import server
+
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", str(tiny_data_dir))
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    def in_use(progress=None, waiting=None):
+        raise data.DataInUseError(tiny_data_dir / "chromadb" / "chromadb_api",
+                                  PermissionError(13, "in use"))
+
+    monkeypatch.setattr(data, "ensure_data", in_use)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.server")
+    st = server._State()
+    retriever = st.prepare()
+    assert st.status == "ready" and retriever is st.retriever
+    assert server.search_api(retriever, "Wall.Create", 3).startswith("Rerank: none; data set: Revit 2026")
+    assert "close other revit-api-docs processes and retry" in caplog.text
+    assert str(tiny_data_dir) in caplog.text
+
+    (tiny_data_dir / "sqlite" / "revit_api.db").unlink()   # nothing to fall back on: the error stands
+    st = server._State()
+    with pytest.raises(data.DataInUseError):
+        st.prepare()
+    assert st.status == "failed" and "close other revit-api-docs processes" in st.error
+
+
+def test_download_reports_files_in_use_without_a_traceback(monkeypatch, tmp_path, capsys):
+    from revit_api_docs import server
+
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "_configure_logging", lambda verbose: None)
+
+    def in_use(progress=None, waiting=None):
+        raise data.DataInUseError(tmp_path / "sqlite" / "revit_api.db", PermissionError(13, "in use"))
+
+    monkeypatch.setattr(data, "ensure_data", in_use)
+    assert server.main(["download"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("revit-api-docs: could not replace ") and "Traceback" not in err
+    assert "close other revit-api-docs processes and retry" in err
+
+
+# -- names pipeline/ uses ------------------------------------------------------
+
+def test_extract_tarball_unpacks_and_replaces_the_target(tmp_path):
+    """pipeline/build_data_v1_1.py unpacks the code store with data._extract_tarball:
+    the target becomes the archive's top-level directory, replacing what was there."""
+    archive = tmp_path / "chromadb_code.tar.gz"
+    archive.write_bytes(_tar_with_dir("chromadb_code", {"chroma.sqlite3": b"c", "seg/link_lists.bin": b"l"}))
+    target = tmp_path / "out" / "chromadb" / "chromadb_code"
+    data._extract_tarball(archive, target)   # (a) no target, no parent yet
+    assert _tree(target) == {"chroma.sqlite3": b"c", "seg/link_lists.bin": b"l"}
+
+    (target / "stale.bin").write_bytes(b"from an earlier build")
+    archive.write_bytes(_tar_with_dir("chromadb_code", {"chroma.sqlite3": b"new"}))
+    data._extract_tarball(archive, target)   # (b) an existing target is replaced as a whole
+    assert _tree(target) == {"chroma.sqlite3": b"new"}
+    assert [p.name for p in target.parent.iterdir()] == ["chromadb_code"]   # no staging or previous copy left
+
+
+def test_every_package_name_the_pipeline_uses_exists():
+    """The tests never run pipeline/; this catches a package name it imports,
+    or reads from an imported module (data._extract_tarball), being removed."""
+    import ast
+    import importlib
+
+    root = Path(__file__).resolve().parents[1]
+    absent: list[str] = []
+    checked = 0
+    for path in sorted((root / "pipeline").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "revit_api_docs"):
+                continue
+            scope = node   # the function the import is in, or the module
+            while scope in parents and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope = parents[scope]
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                where = f"{path.relative_to(root).as_posix()}:{node.lineno}"
+                if hasattr(module, alias.name):
+                    value = getattr(module, alias.name)
+                else:
+                    try:
+                        value = importlib.import_module(f"{node.module}.{alias.name}")
+                    except ImportError:
+                        absent.append(f"{where} {node.module}.{alias.name}")
+                        continue
+                checked += 1
+                if not isinstance(value, type(ast)):   # a function or class: nothing more to check
+                    continue
+                bound = alias.asname or alias.name
+                for use in ast.walk(scope):
+                    if (isinstance(use, ast.Attribute) and isinstance(use.value, ast.Name)
+                            and use.value.id == bound):
+                        checked += 1
+                        if not hasattr(value, use.attr):
+                            absent.append(f"{path.relative_to(root).as_posix()}:{use.lineno} "
+                                          f"{bound}.{use.attr}")
+    assert checked >= 15   # the check saw the pipeline's imports
+    assert absent == []
 
 
 def test_manifest_never_claims_release_hashes_for_pre_existing_files(fake_release, tmp_path, caplog):

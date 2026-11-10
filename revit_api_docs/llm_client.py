@@ -16,6 +16,8 @@ import time
 
 import httpx
 
+from .config import config_proxy_url, normalize_proxy_url
+
 # SDK summarisation calls run long; use a generous timeout.
 _DEFAULT_TIMEOUT = 120.0
 
@@ -45,6 +47,7 @@ class LLMClient:
         self.max_tokens = max_tokens
 
         # Configure HTTP proxy if provided (helps with Gemini routing in restricted networks)
+        proxy = normalize_proxy_url(proxy)
         if proxy:
             self._client = httpx.Client(
                 timeout=timeout,
@@ -271,11 +274,8 @@ def create_llm_client(config: dict[str, Any], provider_override: str | None = No
     temperature = llm_cfg.get("temperature", 0.3)
     max_tokens  = llm_cfg.get("max_tokens", 4096)
 
-    # Proxy: model-level override > global proxy config
-    proxy_cfg   = config.get("proxy", {})
-    proxy_url: str | None = None
-    if proxy_cfg.get("enabled", False):
-        proxy_url = proxy_cfg.get("https") or proxy_cfg.get("http")
+    # Proxy: the config's proxy section (httpx reads HTTPS_PROXY/HTTP_PROXY when it is off)
+    proxy_url = config_proxy_url(config)
 
     return LLMClient(
         base_url=base_url,

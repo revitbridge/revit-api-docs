@@ -68,7 +68,13 @@ this repository's [`v1.1-data` release](https://github.com/revitbridge/revit-api
 into `%LOCALAPPDATA%\revit-api-docs` (Windows) or `~/.local/share/revit-api-docs`
 (Linux; `~/Library/Application Support/revit-api-docs` on macOS), verifies each
 file's SHA-256 and unpacks the vector stores. Tool calls made while that runs
-return a short progress message instead of results. To do it ahead of time:
+return a short progress message instead of results. When two MCP clients start
+the server at the same time, one downloads and the other waits for it (its
+tool calls show the same progress) and then uses the same copy; a download
+cut off by a crash or a closed client resumes on the next start. On Windows a
+newer data set replaces the installed one only once no other revit-api-docs
+process has it open; until then the installed copy is used. To do it ahead of
+time:
 
 ```bash
 uvx revit-api-docs download
@@ -122,7 +128,7 @@ All settings are environment variables; there is no config file to edit.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `REVIT_API_DOCS_DATA_DIR` | `%LOCALAPPDATA%\revit-api-docs` (Windows), `~/.local/share/revit-api-docs` (Linux), `~/Library/Application Support/revit-api-docs` (macOS) | Where the data set lives. An existing tree with `sqlite/` and `chromadb/` from the old `revit-api-rag` checkout works as is |
+| `REVIT_API_DOCS_DATA_DIR` | `%LOCALAPPDATA%\revit-api-docs` (Windows), `~/.local/share/revit-api-docs` (Linux), `~/Library/Application Support/revit-api-docs` (macOS) | Where the data set lives; use an absolute path (a relative one is resolved against the working directory at start-up, with a warning). An existing tree with `sqlite/` and `chromadb/` from the old `revit-api-rag` checkout works as is |
 | `REVIT_API_DOCS_EMBEDDING_API_KEY` | *(unset)* | Key for the embedding endpoint; turns on semantic (vector) search. `OPENROUTER_API_KEY` is used when this is unset |
 | `REVIT_API_DOCS_EMBEDDING_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/embeddings` endpoint |
 | `REVIT_API_DOCS_EMBEDDING_MODEL` | `openai/text-embedding-3-large` | Must produce the same 3072-dimensional space the shipped vectors were built with (`text-embedding-3-large`); another model makes vector search return noise |
@@ -132,7 +138,7 @@ All settings are environment variables; there is no config file to edit.
 | `REVIT_API_DOCS_JEV_MODEL` | `jev-latest` | Jev model or alias; pin a version such as `jev-1.14.0` for reproducible results |
 | `REVIT_API_DOCS_MIN_RELEVANCE` | *(unset)* | Probability 0-1 (`retrieval.api.min_relevance`). Only honoured while Jev ranks the results, and it only decides whether to abstain: no entry is dropped, every result keeps its `Relevance` line. When no entry reaches it, `search_revit_api` starts with "No entry in the Revit 2026 data set scored high enough for this query", notes that the member may be absent from this version or listed under a different name or wording, and lists the low-scoring candidates for reference. No effect with Cohere or without reranking. See "Reranking with Jev" below |
 | `REVIT_API_DOCS_RELEASE_URL` | this repository's `v1.1-data` release | Mirror for the data files; the SHA-256 checks still apply |
-| `HTTPS_PROXY` / `HTTP_PROXY` | *(unset)* | Proxy for the embedding and rerank calls |
+| `HTTPS_PROXY` / `HTTP_PROXY` | *(unset)* | Proxy for the data download and the embedding and rerank calls, for example `http://127.0.0.1:7890`; a value without a scheme (`127.0.0.1:7890`, as local proxy tools write it) is read as `http://` |
 
 Pass them through the `env` block of your MCP host's server entry.
 
@@ -175,6 +181,13 @@ differently from the rows of `revit_api.db`; `v1.1-data` is aligned and logs
 nothing); when the names are not found either, it turns vector search off
 until the server restarts and answers from keyword search. `revit-api-docs download`
 prints the same check for the installed data set.
+
+**Slow or unreachable services.** The embedding request and the rerank calls
+of one search share a 30-second budget; when a host is slow or blocked, the
+search answers with keyword results when the budget is spent instead of
+waiting for every timeout and retry. When vector search fails three queries
+in a row (an expired key, an unreachable host), it pauses for five minutes,
+answering from keyword search, and then tries again.
 
 Privacy: with an embedding, Cohere or TypeSafe key the query text and the
 candidate API entries (public documentation) are sent to that provider. Keep

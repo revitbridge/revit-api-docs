@@ -228,6 +228,28 @@ def test_jev_rejects_malformed_answers(jev_key, answer):
         jev(t).rerank("q", ["a"], strict=True)
 
 
+def _undecodable_transport():
+    """HTTP 200 whose body claims gzip but is not: httpx raises DecodingError."""
+    return httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Encoding": "gzip"}, content=b"this is not gzip"))
+
+
+def test_jev_wraps_a_body_that_cannot_be_decoded(jev_key):
+    with pytest.raises(RerankError, match="DecodingError"):
+        jev(_undecodable_transport()).rerank("wall", ["a", "b"], strict=True)
+    # non-strict: the input order, as for any other failure
+    assert [x.index for x in jev(_undecodable_transport()).rerank("wall", ["a", "b"], top_n=2)] == [0, 1]
+
+
+@pytest.mark.parametrize("kind", ["jev", "cohere"])
+def test_a_query_that_cannot_be_encoded_is_a_rerank_error(jev_key, cohere_key, kind):
+    """A lone surrogate (valid in MCP's JSON, not in UTF-8) fails the request body."""
+    r = jev(jev_transport(lambda d: 0.5)) if kind == "jev" else Reranker(transport=cohere_transport([0.5]))
+    with pytest.raises(RerankError, match="UnicodeEncodeError"):
+        r.rerank("wall \ud800", ["a"], strict=True)
+    assert [x.index for x in r.rerank("wall \ud800", ["a"], top_n=1)] == [0]
+
+
 class _CountingClient(httpx.Client):
     """httpx.Client that records each construction and close (the real transport is injected)."""
 
@@ -546,6 +568,164 @@ def test_jev_failure_without_cohere_keeps_retrieval_order(tiny_dbs, tmp_path, mo
     assert res.rerank_used == "none" and res.rerank_skipped == ["jev"] and not res.abstained
     assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
     assert server.search_api(r, "Wall.Create", 3).splitlines()[0] == "Rerank: none (unavailable: jev); data set: Revit 2026"
+
+
+def test_any_rerank_failure_keeps_the_retrieval_order(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    """A failure that is not an HTTP error (here an undecodable body) degrades
+    the search like a RerankError instead of failing the tool call."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(_undecodable_transport())])
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    expected = plain.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert "rerank provider jev failed" in caplog.text and "DecodingError" in caplog.text
+
+
+def _cohere_answer(results: list[dict]):
+    return httpx.MockTransport(lambda request: httpx.Response(200, json={"results": results}))
+
+
+@pytest.mark.parametrize("results", [
+    [],                                                   # HTTP 200, no results
+    [{"index": 99, "relevance_score": 0.9}],              # only indices outside the candidates
+    [{"index": -1, "relevance_score": 0.9}],
+], ids=["empty", "out-of-range", "negative"])
+def test_an_empty_rerank_answer_keeps_the_candidates(tiny_dbs, tmp_path, monkeypatch, cohere_key, caplog, results):
+    """Candidates existed: an answer that ranks none of them is a provider
+    failure, not "No API entries found"."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="cohere",
+                   chain=[Reranker(transport=_cohere_answer(results))])
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    expected = plain.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert len(res.api_items) == 3
+    assert res.rerank_used == "none" and res.rerank_skipped == ["cohere"]
+    assert "rerank provider cohere ranked none of the 5 candidates" in caplog.text
+    lines = server.search_api(r, "wall", 3).splitlines()
+    assert lines[0] == "Rerank: none (unavailable: cohere); data set: Revit 2026"
+    assert lines[2].startswith("### ")
+
+
+def test_an_empty_jev_answer_falls_back_to_cohere(tiny_dbs, tmp_path, monkeypatch, cohere_key):
+    class _EmptyJev:
+        name, calibrated = "jev", True
+
+        def rerank(self, query, documents, top_n=15, *, strict=False):
+            return []
+
+    chain = [_EmptyJev(), Reranker(transport=cohere_transport([0.0, 0.9, 0.1]))]
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, min_relevance="0.5", chain=chain)
+    res = r.search("wall", api_top_k=2, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "cohere" and res.rerank_skipped == ["jev"] and len(res.api_items) == 2
+    assert not res.abstained   # abstention needs Jev's scores; an empty list is not "nothing relevant"
+
+
+def test_a_slow_reranker_is_cut_at_the_time_budget(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    """A host that does not answer: the search returns the retrieval order
+    when the budget is spent instead of waiting for every attempt."""
+    release = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        release.wait(3)
+        return httpx.Response(504, text="gateway timeout")
+
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(httpx.MockTransport(handler))])
+    r._time_budget = 1.5
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    t0 = time.monotonic()
+    try:
+        res = r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    finally:
+        release.set()
+    assert time.monotonic() - t0 < 2.9   # one blocked attempt alone takes 3 s
+    expected = plain.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert "rerank provider jev did not answer within" in caplog.text and "time budget" in caplog.text
+
+
+def test_no_rerank_starts_when_the_budget_is_spent(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    calls: list = []
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(jev_transport(lambda d: 0.9, calls))])
+    clock = iter([0.0, 100.0, 100.0, 100.0, 100.0])
+    r._clock = lambda: next(clock, 100.0)   # the budget is spent before the rerank step
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert calls == [] and res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert len(res.api_items) == 3 and "no time left in the 30 s search time budget" in caplog.text
+
+
+def test_jev_requests_and_retries_stay_within_the_deadline(jev_key):
+    from revit_api_docs.reranker import request_deadline
+
+    timeouts: list[float] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(529, text="busy")
+
+    r = JevReranker(transport=httpx.MockTransport(handler), sleep=sleeps.append)
+    with request_deadline(time.monotonic() + 0.3):
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.3 + 1e-6   # request timeout cut to the time left
+    assert sleeps == []   # a 0.5 s backoff would end after the deadline: no retry
+
+    with request_deadline(time.monotonic() - 1):   # already spent: no request at all
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 1
+
+    timeouts.clear()   # no deadline: the configured timeout and retries, as before
+    with pytest.raises(RerankError, match="3 attempts"):
+        r.rerank("q", ["a"], strict=True)
+    assert timeouts == [20.0, 20.0, 20.0] and sleeps == [0.5, 1.0]
+
+
+def test_cohere_request_timeout_is_cut_to_the_deadline(cohere_key):
+    from revit_api_docs.reranker import request_deadline
+
+    timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.5}]})
+
+    r = Reranker(transport=httpx.MockTransport(handler))
+    with request_deadline(time.monotonic() + 0.3):
+        assert [x.index for x in r.rerank("q", ["a"], strict=True)] == [0]
+    with request_deadline(time.monotonic() - 1):
+        with pytest.raises(RerankError, match="time budget"):
+            r.rerank("q", ["a"], strict=True)
+    r.rerank("q", ["a"], strict=True)
+    assert len(timeouts) == 2 and 0 < timeouts[0] <= 0.3 + 1e-6 and timeouts[1] == COHERE_TIMEOUT
+
+
+class _BuggyProvider:
+    """A provider with a programming error: raises neither RerankError nor an HTTP error."""
+
+    name = "jev"
+    calibrated = True
+
+    def rerank(self, query, documents, top_n=15, *, strict=False):
+        raise TypeError("unsupported operand type(s)")
+
+
+def test_a_programming_error_in_a_provider_degrades_and_stays_visible(tiny_dbs, tmp_path, monkeypatch,
+                                                                     cohere_key, caplog):
+    chain = [_BuggyProvider(), Reranker(transport=cohere_transport([0.0, 0.9, 0.1]))]
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=chain)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=2, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "cohere" and res.rerank_skipped == ["jev"] and len(res.api_items) == 2
+    assert "TypeError: unsupported operand type(s)" in caplog.text
+    assert "Traceback" in caplog.text   # the stack is logged for an unexpected exception type
 
 
 def test_jev_selected_without_a_key_is_reported(tiny_dbs, tmp_path, monkeypatch):

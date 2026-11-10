@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 log = logging.getLogger("revit_api_docs.server")
 
 MAX_TOP_K = 50
+# Longer queries are refused with a message: API names and task descriptions
+# are far shorter, and every step (keyword search, embedding, rerank, logs)
+# grows with the query.
+MAX_QUERY_CHARS = 2000
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8765
 
@@ -94,6 +98,14 @@ class _State:
         self.detail = f"{name} {pct}%"
         data.stderr_progress(name, done, total)
 
+    def _waiting(self, name: str | None, done: int, total: int) -> None:
+        """Another process holds the install lock; this one reports its download."""
+        if name:
+            pct = 100 * done // total if total else 0
+            self.detail = f"{name} {pct}%, in another revit-api-docs process"
+        else:
+            self.detail = "in another revit-api-docs process"
+
     def prepare(self) -> RAGRetriever:
         """Blocking: install the data set if needed and build the retriever."""
         with self.lock:
@@ -101,7 +113,15 @@ class _State:
                 return self.retriever
             try:
                 self.status = "downloading" if data.missing() else "loading"
-                paths = data.ensure_data(progress=self._progress)
+                try:
+                    paths = data.ensure_data(progress=self._progress, waiting=self._waiting)
+                except data.DataInUseError as e:
+                    # An update could not replace files another process has
+                    # open: serve the installed data set until it can.
+                    paths = data.paths()
+                    if not data.usable_as_is(paths.root):
+                        raise
+                    log.warning("%s. Until then this server uses the data set in %s.", e, paths.root)
                 self.status = "loading"
                 from revit_api_docs.retriever import RAGRetriever
 
@@ -199,12 +219,22 @@ def rerank_line(results, revit_version: str) -> str:
     return f"Rerank: {rerank_label(results)}; data set: Revit {revit_version}"
 
 
+def _query_too_long(query: str) -> str | None:
+    """The tool reply for a query over MAX_QUERY_CHARS, else None."""
+    if len(query) <= MAX_QUERY_CHARS:
+        return None
+    return (f"The query is {len(query):,} characters long; the limit is {MAX_QUERY_CHARS:,}. "
+            "Ask with an API name or a short task description.")
+
+
 def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
+    from revit_api_docs.retriever import quote_query
+
     results = retriever.search(query, api_top_k=top_k, code_top_k=0, rewrite=False, rerank=True)
     ctx = retriever.build_context(results)
     api_context = ctx.get("api_context")
     if not api_context:
-        return _with_environment_notes(f"No API entries found for {query!r}.", query)
+        return _with_environment_notes(f"No API entries found for {quote_query(query)}.", query)
     head = [rerank_line(results, retriever.revit_version)]
     if results.abstained:
         head = [abstention_line(retriever.revit_version, results.abstain_reason),
@@ -213,9 +243,11 @@ def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
 
 
 def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
+    from revit_api_docs.retriever import quote_query
+
     results = retriever.search(query, api_top_k=0, code_top_k=top_k, rewrite=False, rerank=False)
     ctx = retriever.build_context(results)
-    return ctx.get("code_context") or f"No SDK examples found for {query!r}."
+    return ctx.get("code_context") or f"No SDK examples found for {quote_query(query)}."
 
 
 # -- Tools ---------------------------------------------------------------------
@@ -236,6 +268,9 @@ async def search_revit_api(query: str, top_k: int = 10) -> str:
     add-in") also get curated environment notes. top_k: 1-50, default 10."""
     if not query or not query.strip():
         return "Give a query: an API name such as 'Wall.Create' or a short task description."
+    too_long = _query_too_long(query.strip())
+    if too_long:
+        return too_long
     msg = _state.message_if_not_ready()
     if msg:
         return _with_environment_notes(msg, query.strip())
@@ -251,6 +286,9 @@ async def get_code_examples(query: str, top_k: int = 3) -> str:
     and their summaries are English only. top_k: 1-50, default 3."""
     if not query or not query.strip():
         return "Give a query: an API name or the task the sample should show."
+    too_long = _query_too_long(query.strip())
+    if too_long:
+        return too_long
     msg = _state.message_if_not_ready()
     if msg:
         return msg
@@ -344,12 +382,36 @@ def serve(transport: str = "stdio", host: str = DEFAULT_HTTP_HOST, port: int = D
     mcp.run(transport="stdio")
 
 
+def _prepare_text_stdout() -> None:
+    """Make stdout safe for the `search` and `environment` output (never used by `serve`).
+
+    A console keeps its own encoding (code page 936 on Chinese Windows),
+    and a character it cannot show becomes "?" instead of raising; output
+    that is redirected or piped is UTF-8.
+    """
+    out = sys.stdout
+    reconfigure = getattr(out, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        console = bool(out.isatty())
+    except (AttributeError, ValueError):
+        console = False
+    try:
+        if console:
+            reconfigure(errors="replace")
+        else:
+            reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):   # a closed or detached stdout: leave it as it is
+        pass
+
+
 def _print_environment(query: str, revit) -> int:
     from revit_api_docs import environment
 
     notes = (environment.match(query, revit=revit, limit=None) if query.strip()
              else environment.select(revit))
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    _prepare_text_stdout()
     for n in notes:
         print(f"[{n.id}] {environment.describe_range(n)} | tags: {', '.join(n.tags)}")
         print(f"  {n.text}")
@@ -394,8 +456,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "environment":
         return _print_environment(args.query, args.revit)
 
+    data.pin_data_dir()   # one absolute data directory for the whole process
+
     if args.command == "download":
-        paths = data.ensure_data(progress=data.stderr_progress)
+        try:
+            paths = data.ensure_data(progress=data.stderr_progress)
+        except data.DataInUseError as e:
+            print(f"revit-api-docs: {e}", file=sys.stderr)
+            return 1
         print(f"data ready in {paths.root}", file=sys.stderr)
         for line in vector_store_report(paths):
             print(line, file=sys.stderr)
@@ -407,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             text = search_examples(retriever, args.query, _clamp_top_k(args.top_k or 3, 3))
         else:
             text = search_api(retriever, args.query, _clamp_top_k(args.top_k or 10, 10))
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        _prepare_text_stdout()
         print(text)
         return 0
 

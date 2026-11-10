@@ -3,6 +3,7 @@ and a real stdio round trip with a keyword-only retriever."""
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import socket
 import subprocess
@@ -119,6 +120,44 @@ def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
 
 
 
+@pytest.mark.parametrize("scorer", ["bm25", "like"])
+def test_a_long_query_is_cut_in_replies_and_logs(tiny_dbs, monkeypatch, tmp_path, caplog, scorer):
+    """The query is echoed in "No ... found" replies and logged at INFO; both
+    keep a short prefix with an ASCII marker, whatever its length."""
+    from revit_api_docs.config import load_config
+    from revit_api_docs.retriever import RAGRetriever
+
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    api_db, sdk_db = tiny_dbs
+    r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    if scorer == "like":
+        r._bm25 = None
+    query = " ".join(f"qq{i:04d}" for i in range(330))   # 2,309 characters, no match
+    caplog.set_level(logging.INFO)
+    text = server.search_api(r, query, 5)
+    assert text.startswith("No API entries found for 'qq0000 qq0001") and len(text) < 200
+    assert f"... ({len(query)} characters)." in text and text.isascii()
+    text = server.search_examples(r, query, 2)
+    assert text.startswith("No SDK examples found for 'qq0000") and len(text) < 200
+    assert max(len(rec.getMessage()) for rec in caplog.records) < 600
+
+
+def test_an_overlong_query_gets_a_clear_message(monkeypatch):
+    st = server._State()
+    started = []
+    monkeypatch.setattr(st, "start_background", lambda: started.append(1))
+    monkeypatch.setattr(server, "_state", st)
+    st.status = "downloading"
+    for tool in (server.search_revit_api, server.get_code_examples):
+        msg = asyncio.run(tool("Wall.Create " + "x" * 400_000))
+        assert msg == ("The query is 400,012 characters long; the limit is 2,000. Ask with an API "
+                       "name or a short task description.")
+    assert started == []   # nothing was searched or started
+    assert server.MAX_QUERY_CHARS == 2000
+    assert "downloading" in asyncio.run(server.search_revit_api("w" * 2000))   # the limit itself is accepted
+
+
 def test_the_first_line_names_the_data_set_of_the_retriever(tiny_dbs, monkeypatch, tmp_path):
     """The data set version on the Rerank line is the retriever's revit_version (config)."""
     from revit_api_docs.config import load_config
@@ -170,6 +209,74 @@ def test_download_reports_the_vector_store_check(monkeypatch, tmp_path):
     assert server.vector_store_report(paths) == [
         "vector store check failed (ValueError: no such collection); vector search will be off when it "
         "fails the same way at query time"]
+
+
+# -- CLI output encoding --------------------------------------------------------
+
+class _GbkStdout(io.TextIOWrapper):
+    """stdout as on a Chinese-language Windows: GBK (code page 936), strict errors."""
+
+    def __init__(self, tty: bool):
+        super().__init__(io.BytesIO(), encoding="gbk", errors="strict", newline="\n")
+        self._tty = tty
+        self.reconfigured: list[dict] = []
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def reconfigure(self, **kw):
+        self.reconfigured.append(kw)
+        super().reconfigure(**kw)
+
+    def written(self) -> bytes:
+        self.flush()
+        return self.buffer.getvalue()
+
+
+# Curly quotes and CJK exist in GBK; the no-break space U+00A0 does not.
+RESULT = "### " + chr(0x201C) + "Wall.Create" + chr(0x201D) + chr(0xA0) + chr(0x521B) + chr(0x5EFA) + chr(0x5899)
+
+
+@pytest.mark.parametrize("command", ["search", "environment"])
+@pytest.mark.parametrize("tty", [True, False], ids=["console", "redirected"])
+def test_cli_output_keeps_the_console_encoding(monkeypatch, command, tty):
+    """On a console the output keeps the console's encoding (characters it
+    cannot show become "?"); redirected or piped, it is UTF-8."""
+    import dataclasses
+
+    from revit_api_docs import environment
+
+    out = _GbkStdout(tty)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(server, "_configure_logging", lambda verbose: None)
+    if command == "search":
+        monkeypatch.setattr(server._state, "prepare", lambda: object())
+        monkeypatch.setattr(server, "search_api", lambda retriever, query, top_k: RESULT)
+        argv, text = ["search", "wall"], RESULT + "\n"
+    else:
+        note = dataclasses.replace(environment.load_notes()[0], id="n", text=RESULT, tags=("t",),
+                                   source="s", revit=environment.RevitRange.parse("*"))
+        monkeypatch.setattr(environment, "select", lambda revit: [note])
+        argv, text = ["environment"], f"[n] any Revit release | tags: t\n  {RESULT}\n  source: s\n\n"
+    assert server.main(argv) == 0
+    assert out.written() == (text.encode("gbk", errors="replace") if tty else text.encode("utf-8"))
+    assert out.reconfigured == [{"errors": "replace"} if tty else {"encoding": "utf-8", "errors": "replace"}]
+
+
+def test_output_setup_survives_a_closed_stdout(monkeypatch):
+    out = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+    out.close()
+    monkeypatch.setattr(sys, "stdout", out)
+    server._prepare_text_stdout()   # never fails the CLI before it has printed anything
+    monkeypatch.setattr(sys, "stdout", None)   # pythonw: no stdout at all
+    server._prepare_text_stdout()
+
+
+def test_serve_never_touches_stdout(recorded_run, monkeypatch):
+    out = _GbkStdout(tty=False)
+    monkeypatch.setattr(sys, "stdout", out)
+    assert server.main(["serve"]) == 0
+    assert out.reconfigured == [] and out.written() == b""
 
 
 # -- CLI subcommands --------------------------------------------------------
@@ -311,6 +418,18 @@ def test_bad_serve_options_are_rejected(recorded_run, argv, capsys):
         server.main(argv)
     assert e.value.code == 2
     assert recorded_run == []
+
+
+def test_serve_pins_a_relative_data_dir_before_starting(recorded_run, monkeypatch, tmp_path, caplog):
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVIT_API_DOCS_DATA_DIR", "data")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    assert server.main(["serve"]) == 0
+    assert recorded_run == [("stdio", {})]
+    assert os.environ["REVIT_API_DOCS_DATA_DIR"] == os.path.join(os.getcwd(), "data")
+    assert "REVIT_API_DOCS_DATA_DIR" in caplog.text and "is relative" in caplog.text
 
 
 def test_host_and_port_without_http_are_ignored_with_a_warning(recorded_run, caplog):

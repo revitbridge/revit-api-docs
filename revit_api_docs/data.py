@@ -26,9 +26,14 @@ copy can be pointed at directly):
     chromadb/chromadb_api/
     chromadb/chromadb_code/
     manifest.json
+
+While installing, the directory also holds downloads/ (partial and verified
+downloads, removed afterwards) and .install.lock (kept; see install_lock).
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -40,9 +45,14 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 import httpx
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 log = logging.getLogger("revit_api_docs.data")
 
@@ -53,6 +63,12 @@ RELEASE_TAG = "v1.1-data"
 RELEASE_URL = f"https://github.com/revitbridge/revit-api-docs/releases/download/{RELEASE_TAG}"
 
 ProgressFn = Callable[[str, int, int], None]
+# Called while another process holds the install lock: (file it is
+# downloading or None, bytes it has so far, size of that file).
+WaitFn = Callable[[str | None, int, int], None]
+
+LOCK_FILENAME = ".install.lock"
+LOCK_POLL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -101,8 +117,28 @@ def default_data_dir() -> Path:
 
 
 def data_dir() -> Path:
+    """REVIT_API_DOCS_DATA_DIR as an absolute path, else the default location."""
     env = os.environ.get(ENV_DATA_DIR)
-    return Path(env).expanduser() if env else default_data_dir()
+    return Path(os.path.abspath(Path(env).expanduser())) if env else default_data_dir()
+
+
+def pin_data_dir() -> Path:
+    """Resolve the data directory once, at start-up, and return it.
+
+    A relative REVIT_API_DOCS_DATA_DIR is taken against the working
+    directory, which differs between MCP clients, so the same setting could
+    install the data set in several places. Its absolute form is written
+    back to the environment (later lookups in this process agree even if the
+    working directory changes) and a warning names it.
+    """
+    env = os.environ.get(ENV_DATA_DIR)
+    root = data_dir()
+    if env and not Path(env).expanduser().is_absolute():
+        os.environ[ENV_DATA_DIR] = str(root)
+        log.warning("%s=%r is relative to the working directory, which differs between MCP "
+                    "clients; using %s for this process. Set an absolute path to keep one data set.",
+                    ENV_DATA_DIR, env, root)
+    return root
 
 
 def release_url() -> str:
@@ -144,13 +180,22 @@ def unexpected_sizes(root: Path) -> list[tuple[Artifact, int]]:
 
 
 def read_manifest(root: Path) -> dict | None:
+    """The manifest this installer wrote, or None.
+
+    None also for a file that is unreadable, is not JSON, or is not an
+    object naming a release: such a file was not written by this installer
+    and counts as absent (the tree is used as it is).
+    """
     p = root / "manifest.json"
     if not p.is_file():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        manifest = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("release"), str):
+        return None
+    return manifest
 
 
 def missing(root: Path | None = None) -> list[Artifact]:
@@ -218,27 +263,95 @@ def download_file(url: str, dest: Path, expected_size: int,
         progress(name or dest.name, dest.stat().st_size, expected_size)
 
 
-def _extract_tarball(archive: Path, target: Path) -> None:
-    """Unpack `archive` (which holds one top-level directory) to `target`."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
-    try:
-        with tarfile.open(archive, "r:gz") as tar:
-            try:
-                tar.extractall(tmp, filter="data")
-            except TypeError:  # Python < 3.11.4 without the filter argument
-                tar.extractall(tmp)
-        entries = [p for p in tmp.iterdir()]
-        src = entries[0] if len(entries) == 1 and entries[0].is_dir() else tmp
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.move(str(src), str(target))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+class DataInUseError(RuntimeError):
+    """A verified download could not replace the installed copy: another
+    process has a file of it open (Windows refuses to move such a file, or a
+    directory that holds one). The installed copy is left as it was."""
+
+    def __init__(self, target: Path, error: OSError):
+        reason = error.strerror or str(error)
+        super().__init__(
+            f"could not replace {target} with the {RELEASE_TAG} data set ({reason}); another "
+            "process has it open: close other revit-api-docs processes and retry (the installed "
+            "data set is kept as it is, and the verified download is reused)")
 
 
-def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> None:
-    """Download one artifact, verify it and put it in place."""
+# Waits before retrying a rename Windows refused: a virus scanner or the
+# search indexer may hold a freshly written file for a moment.
+RENAME_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
+
+
+def _rename(src: Path, dst: Path, *, replace: bool = False) -> None:
+    """os.rename (os.replace with `replace`), retried while Windows refuses it."""
+    for delay in (*RENAME_RETRY_DELAYS, None):
+        try:
+            (os.replace if replace else os.rename)(src, dst)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+
+
+def _backup_name(target: Path) -> Path:
+    return target.with_name(f".{target.name}.old-{os.getpid()}-{time.monotonic_ns()}")
+
+
+def _remove(path: Path) -> None:
+    """Best effort: a leftover is removed by the next install (_remove_leftovers)."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _leftovers(root: Path) -> list[Path]:
+    """Previous copies (.<name>.old-*) and unpacked staging directories
+    (.<name>-new-*) next to the targets."""
+    found: list[Path] = []
+    for art in ARTIFACTS:
+        target = root / art.target
+        if target.parent.is_dir():
+            for pattern in (f".{target.name}.old-*", f".{target.name}-new-*"):
+                found.extend(sorted(target.parent.glob(pattern)))
+    return found
+
+
+def _remove_leftovers(root: Path) -> None:
+    for leftover in _leftovers(root):
+        _remove(leftover)
+
+
+def _restore_interrupted_swaps(root: Path) -> None:
+    """Put back the previous copy of a target an install left absent.
+
+    An install stopped between the two renames of _swap_in leaves the target
+    absent and its previous copy as .<name>.old-*. When there is exactly one
+    such copy it is the target's and goes back in place; with several,
+    which one is not known, and they stay until a new copy has been
+    downloaded and verified (then _remove_leftovers removes them).
+    """
+    for art in ARTIFACTS:
+        target = root / art.target
+        if target.exists() or target.is_symlink() or not target.parent.is_dir():
+            continue
+        backups = list(target.parent.glob(f".{target.name}.old-*"))
+        if len(backups) != 1:
+            continue
+        try:
+            _rename(backups[0], target)
+        except OSError as e:
+            log.warning("could not put back %s from %s (%s)", target, backups[0].name, e)
+        else:
+            log.warning("put back %s from %s, left by an interrupted install", target, backups[0].name)
+
+
+def fetch_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> Path:
+    """Download `art` into root/downloads (resuming a partial file) and check
+    its SHA-256; return the verified file. Nothing in place is touched."""
     url = f"{release_url()}/{art.name}"
     part = root / "downloads" / f"{art.name}.part"
     log.info("downloading %s (%.1f MB) from %s", art.name, art.size / 1e6, url)
@@ -251,14 +364,109 @@ def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = No
             f"{art.name}: SHA-256 mismatch (got {digest[:16]}..., expected "
             f"{art.sha256[:16]}...); the partial download was discarded, run again"
         )
+    return part
 
-    target = root / art.target
+
+def _unpack_beside(archive: Path, target: Path) -> tuple[Path, Path]:
+    """Unpack `archive` (one top-level directory) into a hidden directory next
+    to `target`, so that moving it in is a rename on the same volume. Returns
+    the unpacked tree and the scratch directory to remove afterwards."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=f".{target.name}-new-", dir=target.parent))
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            try:
+                tar.extractall(scratch, filter="data")
+            except TypeError:  # Python < 3.11.4 without the filter argument
+                tar.extractall(scratch)
+        entries = list(scratch.iterdir())
+        staged = entries[0] if len(entries) == 1 and entries[0].is_dir() else scratch
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    return staged, scratch
+
+
+def _stage(art: Artifact, part: Path, root: Path) -> tuple[Path, Path | None]:
+    """The verified download ready to be moved into place, and a scratch
+    directory to remove afterwards: a file as it is, a tarball unpacked next
+    to its target (_unpack_beside)."""
+    if not art.extract:
+        return part, None
+    return _unpack_beside(part, root / art.target)
+
+
+def _swap_in(staged: Path, target: Path) -> Path | None:
+    """Move `staged` to `target`; return where the previous copy went (None if there was none).
+
+    Two renames and no deletion, so `target` holds the previous copy or the
+    new one, each complete, at every moment. When the previous copy cannot
+    be moved aside (another process has a file of it open) it stays where it
+    is and DataInUseError is raised; when the new one cannot be moved in,
+    the previous one is put back.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if target.exists() or target.is_symlink():
+        backup = _backup_name(target)
+        try:
+            _rename(target, backup)
+        except PermissionError as e:
+            raise DataInUseError(target, e) from e
+    try:
+        _rename(staged, target)
+    except OSError as e:
+        if backup is not None:
+            _put_back(backup, target)
+        if isinstance(e, PermissionError):
+            raise DataInUseError(target, e) from e
+        raise
+    return backup
+
+
+def _put_back(backup: Path, target: Path) -> None:
+    try:
+        _rename(backup, target)
+    except OSError as e:
+        log.error("could not move %s back to %s (%s); move it back by hand", backup, target, e)
+
+
+def _undo_swap(target: Path, staged: Path, backup: Path | None) -> None:
+    """Reverse _swap_in: the new copy back to where it was staged, the previous one back in place."""
+    try:
+        _rename(target, staged)
+    except OSError as e:
+        log.error("could not move the new %s out again (%s); the next start installs it again", target, e)
+        return
+    if backup is not None:
+        _put_back(backup, target)
+
+
+def _extract_tarball(archive: Path, target: Path) -> None:
+    """Unpack `archive` (which holds one top-level directory) to `target`,
+    replacing what is there (pipeline/build_data_v1_1.py uses it)."""
+    staged, scratch = _unpack_beside(archive, target)
+    try:
+        backup = _swap_in(staged, target)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if backup is not None:
+        _remove(backup)
+
+
+def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> None:
+    """Download one artifact, verify it and put it in place (see _swap_in)."""
+    part = fetch_artifact(art, root, progress)
+    staged, scratch = _stage(art, part, root)
+    try:
+        backup = _swap_in(staged, root / art.target)
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+    if backup is not None:
+        _remove(backup)
     if art.extract:
-        _extract_tarball(part, target)
         part.unlink(missing_ok=True)
-    else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(part, target)
 
 
 def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
@@ -286,9 +494,68 @@ def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
     return entry
 
 
+def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> None:
+    """Install `todo` into `root` and write the manifest; the caller holds the install lock.
+
+    Every artifact is downloaded and verified, and the tarballs unpacked next
+    to their targets, before anything in place changes. Then each target is
+    swapped in by renames (_swap_in) and the manifest is written. When a
+    target cannot be swapped (DataInUseError: a file of the installed copy
+    is open elsewhere) or the manifest cannot be written, the ones already
+    swapped are swapped back: the tree stays the one its manifest names, and
+    the verified downloads stay in root/downloads for the next try.
+    """
+    _restore_interrupted_swaps(root)
+    parts = [fetch_artifact(art, root, progress) for art in todo]
+    # Only now: until every download is verified, a previous copy left by an
+    # interrupted install may be the only copy there is.
+    _remove_leftovers(root)
+    staged: list[tuple[Artifact, Path, Path | None]] = []
+    swapped: list[tuple[Path, Path, Path | None]] = []   # (target, staged copy, previous copy)
+    try:
+        for art, part in zip(todo, parts):
+            staged.append((art, *_stage(art, part, root)))
+        for art, path, _ in staged:
+            target = root / art.target
+            swapped.append((target, path, _swap_in(path, target)))
+        write_manifest(root, installed=[a.name for a in todo])
+    except BaseException:
+        for target, path, backup in reversed(swapped):
+            _undo_swap(target, path, backup)
+        raise
+    finally:
+        for _, _, scratch in staged:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
+    files = (read_manifest(root) or {}).get("files") or {}
+    trusted = [n for n, e in files.items() if e.get("trusted")]
+    if trusted:
+        log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
+    for _, _, backup in swapped:
+        if backup is not None:
+            _remove(backup)
+    shutil.rmtree(root / "downloads", ignore_errors=True)
+    _remove_leftovers(root)   # one more try for a previous copy something still had open
+    for leftover in _leftovers(root):
+        log.warning("could not remove %s, left over from installing the data set; delete it by hand",
+                    leftover)
+
+
+def usable_as_is(root: Path | None = None) -> bool:
+    """True when `root` holds what keyword search needs (both SQLite files),
+    whatever release they come from: the server can run on them while an
+    update waits for files in use to be closed."""
+    p = paths(root)
+    return p.api_db.is_file() and p.sdk_db.is_file()
+
+
 def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
     """Record the tree under `root`; `installed` names the artifacts this run
-    downloaded and verified (see describe_artifact for the rest)."""
+    downloaded and verified (see describe_artifact for the rest).
+
+    Written to a temporary file that then replaces manifest.json, so a write
+    that fails (disk full) leaves the previous manifest as it was.
+    """
     root.mkdir(parents=True, exist_ok=True)
     done = set(installed)
     manifest = {
@@ -297,11 +564,123 @@ def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "files": {a.name: describe_artifact(root, a, a.name in done) for a in ARTIFACTS},
     }
-    (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    tmp = root / f".manifest.json.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        _rename(tmp, root / "manifest.json", replace=True)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
-def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) -> DataPaths:
-    """Make sure every artifact is installed under `root`; return its paths."""
+if sys.platform == "win32":
+    def _try_lock(fd: int) -> bool | None:
+        """True: locked; False: another handle holds it; None: locking not possible here."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # first byte; locking past the end is allowed
+        except OSError as e:
+            return False if e.errno in (errno.EACCES, errno.EDEADLK) else None
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+else:
+    def _try_lock(fd: int) -> bool | None:
+        """True: locked; False: another handle holds it; None: locking not possible here."""
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            return False if e.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK) else None
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _other_install_progress(root: Path) -> tuple[str | None, int, int]:
+    """The download another process is writing: the .part written last, as
+    (artifact name, bytes so far, artifact size); (None, 0, 0) when none is."""
+    sizes = {a.name: a.size for a in ARTIFACTS}
+    latest: tuple[float, str, int] | None = None
+    try:
+        parts = list((root / "downloads").glob("*.part"))
+    except OSError:
+        parts = []
+    for part in parts:
+        name = part.name[:-len(".part")]
+        try:
+            st = part.stat()
+        except OSError:
+            continue
+        if name in sizes and (latest is None or st.st_mtime > latest[0]):
+            latest = (st.st_mtime, name, st.st_size)
+    if latest is None:
+        return None, 0, 0
+    return latest[1], min(latest[2], sizes[latest[1]]), sizes[latest[1]]
+
+
+@contextlib.contextmanager
+def install_lock(root: Path, waiting: WaitFn | None = None,
+                 poll: float = LOCK_POLL_SECONDS) -> Iterator[bool]:
+    """Hold the install lock of the data directory `root` for the block.
+
+    While another process holds it this waits (logging once, and calling
+    `waiting` about every `poll` seconds with that process's download). The
+    lock is the operating system's, on root/.install.lock (LockFile on
+    Windows, flock elsewhere): it is released when the holding process ends,
+    however it ends, so a crashed install never blocks the next one. The
+    file stays (removing it would race with a process about to lock it).
+    Where the file cannot be opened or locked the block runs unlocked, with
+    a warning. Yields True when the lock is held.
+    """
+    path = Path(root) / LOCK_FILENAME
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        log.warning("cannot open %s (%s); installing without the lock", path, e)
+        yield False
+        return
+    locked = False
+    try:
+        announced = False
+        while True:
+            state = _try_lock(fd)
+            if state is None:
+                log.warning("cannot lock %s; installing without the lock", path)
+                break
+            if state:
+                locked = True
+                break
+            if not announced:
+                announced = True
+                log.warning("another revit-api-docs process is installing the data set in %s; "
+                            "waiting for it to finish", root)
+            if waiting is not None:
+                waiting(*_other_install_progress(Path(root)))
+            time.sleep(poll)
+        yield locked
+    finally:
+        if locked:
+            try:
+                _unlock(fd)
+            except OSError:
+                pass   # closing the descriptor releases it as well
+        os.close(fd)
+
+
+def ensure_data(root: Path | None = None, progress: ProgressFn | None = None,
+                waiting: WaitFn | None = None) -> DataPaths:
+    """Make sure every artifact is installed under `root`; return its paths.
+
+    The install runs under the directory's install lock (install_lock). A
+    process that finds the data set missing while another installs it waits
+    (`waiting` is called meanwhile), then finds it installed and downloads
+    nothing; the waiting process never writes to the directory.
+    """
     p = paths(root)
     todo = missing(p.root)
     for art, size in unexpected_sizes(p.root):
@@ -309,13 +688,12 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
                     "(delete it to re-download)", p.root / art.target, size, RELEASE_TAG, art.size)
     if todo:
         p.root.mkdir(parents=True, exist_ok=True)
-        for art in todo:
-            install_artifact(art, p.root, progress=progress)
-        write_manifest(p.root, installed=[a.name for a in todo])
-        trusted = [n for n, e in read_manifest(p.root)["files"].items() if e.get("trusted")]
-        if trusted:
-            log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
-        shutil.rmtree(p.root / "downloads", ignore_errors=True)
+        with install_lock(p.root, waiting=waiting):
+            todo = missing(p.root)   # another process may have installed it while this one waited
+            if todo:
+                _install(p.root, todo, progress)
+            else:
+                log.info("data set installed by another process in %s", p.root)
     elif read_manifest(p.root) is None:
         log.info("using existing data in %s (no manifest)", p.root)
     return p
