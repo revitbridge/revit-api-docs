@@ -41,6 +41,7 @@ pipeline = [
   "google-genai>=1",
   "tree-sitter>=0.20",
   "tree-sitter-c-sharp>=0.20",
+  "striprtf>=0.0.23",
 ]
 
 [project.urls]
