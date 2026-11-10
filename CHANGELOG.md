@@ -8,6 +8,75 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Two processes starting together on a machine without the data set (two
+  MCP clients, or two windows of one) downloaded into the same partial file:
+  the second resumed from the first one's half-written download, one failed
+  with `PermissionError [WinError 32]`, the other with a SHA-256 mismatch,
+  and everything had to be fetched again. The install now holds a lock on
+  `.install.lock` in the data directory, an operating-system lock (Windows
+  `LockFile`, `flock` elsewhere) that goes away with the process however it
+  ends, so a crashed or killed download never blocks the next start. A second
+  process waits without writing anything, its tool calls report the
+  download ("currently chromadb_api.tar.gz 42%, in another revit-api-docs
+  process"), and it then uses the data set the first one installed. An
+  interrupted download still resumes on the next start.
+- A proxy variable without a scheme (`HTTPS_PROXY=127.0.0.1:7890`, the form
+  common local proxy tools write) switched vector search off for the life of
+  the process ("embedding disabled (Unknown scheme for proxy URL ...)"). A
+  value without a scheme is now read as `http://...`, values with a scheme
+  are kept, and an empty or blank one counts as unset, for the embedding
+  client and for the proxy section of a config file (rerank and LLM
+  clients); the rerank clients and the data download, which leave the
+  environment to httpx, already did the same.
+- A rerank failure that was not an HTTP error failed the whole search: an
+  undecodable response body (`httpx.DecodingError`) or a query with a lone
+  surrogate (`UnicodeEncodeError`). Every failure of the rerank step now
+  degrades to the next provider or the retrieval order; an unexpected
+  exception type is logged with its stack. Building the embedding provider
+  likewise falls back to keyword search on any error (for example a config
+  key the provider does not take) instead of failing the server.
+- A rerank answer with no results (HTTP 200, empty list) emptied the answer:
+  "No API entries found" although there were candidates. An answer that
+  ranks none of the candidates is now treated as a failed call (the
+  candidates stay, the first line reports the provider as unavailable), and
+  only indices of actual candidates are used, each once. Abstention, which
+  Jev signals through its scores, is unchanged.
+- A slow or blocked embedding or rerank host could hold one search for
+  about 140 s, beyond the 60 s many MCP clients allow, and after three
+  failures vector search was off until a restart. The embedding and rerank
+  calls of one search now share a 30 s budget (`retrieval.time_budget` in
+  the bundled config); when it is spent the search answers with keyword
+  results, and rerank requests are cut to the time left. After three
+  consecutive failures the vector step pauses for 5 minutes and then tries
+  again. The embedding request timeout is 10 s instead of 30 s (one retry,
+  as before); Jev's and Cohere's 20 s and Jev's 2 retries are unchanged
+  within the budget.
+- `search` and `environment` wrote UTF-8 to the console whatever its code
+  page, so results showed as mojibake on a GBK (code page 936) console. A
+  console now keeps its encoding (a character it cannot show becomes `?`);
+  redirected or piped output stays UTF-8. `serve` never touches stdout.
+- A query of any length was echoed in "No API entries found for ..." and
+  logged in full (400,000 characters gave a 400,027-character reply and
+  about 2 MB of log). Replies and logs now show the first 80 characters and
+  the length; the tools answer a query over 2,000 characters with a short
+  message instead of searching.
+- A `manifest.json` that parses to a list, a number or a string made every
+  start fail with `AttributeError`, and an object without a release name
+  marked the whole data set stale. Both now count as no manifest.
+- A relative `REVIT_API_DOCS_DATA_DIR` was taken against each MCP client's
+  working directory, so the data set could be downloaded into several
+  places. It is resolved to an absolute path once at start-up, with a
+  warning that names it. The default location is unchanged.
+- Upgrading to another data release while an older server had the data set
+  open (Windows) replaced the SQLite files and then failed halfway through
+  deleting the vector store, leaving it without some of its files. Every
+  file is now downloaded, verified and unpacked before anything in place
+  changes, and each one is swapped in by renames, so the installed copy is
+  either the old one or the new one, complete. When a file is in use the
+  old tree stays as it was, the verified downloads are kept for the next try
+  (nothing is downloaded again), the server keeps serving the installed
+  data set and logs "close other revit-api-docs processes and retry", and
+  `revit-api-docs download` prints the same and exits 1.
 - The `pipeline` extra declares `striprtf` (`>=0.0.23`). The SDK extraction
   (`pipeline/sdk_parser/extract.py`) converts RTF readmes with it and, when it
   was missing, silently fell back to a regex that keeps `\'xx` escapes and
