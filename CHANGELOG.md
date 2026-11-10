@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-09
+
+Fixes for a first run shared by two clients, for proxy settings written without
+a scheme, and for searches when the optional services are slow or failing.
+The data set, the tools and the dependencies are unchanged; an installed data
+directory is used as it is.
+
 ### Fixed
 
 - Two processes starting together on a machine without the data set (two
