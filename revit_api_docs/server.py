@@ -113,7 +113,15 @@ class _State:
                 return self.retriever
             try:
                 self.status = "downloading" if data.missing() else "loading"
-                paths = data.ensure_data(progress=self._progress, waiting=self._waiting)
+                try:
+                    paths = data.ensure_data(progress=self._progress, waiting=self._waiting)
+                except data.DataInUseError as e:
+                    # An update could not replace files another process has
+                    # open: serve the installed data set until it can.
+                    paths = data.paths()
+                    if not data.usable_as_is(paths.root):
+                        raise
+                    log.warning("%s. Until then this server uses the data set in %s.", e, paths.root)
                 self.status = "loading"
                 from revit_api_docs.retriever import RAGRetriever
 
@@ -448,7 +456,11 @@ def main(argv: list[str] | None = None) -> int:
     data.pin_data_dir()   # one absolute data directory for the whole process
 
     if args.command == "download":
-        paths = data.ensure_data(progress=data.stderr_progress)
+        try:
+            paths = data.ensure_data(progress=data.stderr_progress)
+        except data.DataInUseError as e:
+            print(f"revit-api-docs: {e}", file=sys.stderr)
+            return 1
         print(f"data ready in {paths.root}", file=sys.stderr)
         for line in vector_store_report(paths):
             print(line, file=sys.stderr)

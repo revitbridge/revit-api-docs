@@ -263,27 +263,63 @@ def download_file(url: str, dest: Path, expected_size: int,
         progress(name or dest.name, dest.stat().st_size, expected_size)
 
 
-def _extract_tarball(archive: Path, target: Path) -> None:
-    """Unpack `archive` (which holds one top-level directory) to `target`."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
-    try:
-        with tarfile.open(archive, "r:gz") as tar:
-            try:
-                tar.extractall(tmp, filter="data")
-            except TypeError:  # Python < 3.11.4 without the filter argument
-                tar.extractall(tmp)
-        entries = [p for p in tmp.iterdir()]
-        src = entries[0] if len(entries) == 1 and entries[0].is_dir() else tmp
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.move(str(src), str(target))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+class DataInUseError(RuntimeError):
+    """A verified download could not replace the installed copy: another
+    process has a file of it open (Windows refuses to move such a file, or a
+    directory that holds one). The installed copy is left as it was."""
+
+    def __init__(self, target: Path, error: OSError):
+        reason = error.strerror or str(error)
+        super().__init__(
+            f"could not replace {target} with the {RELEASE_TAG} data set ({reason}); another "
+            "process has it open: close other revit-api-docs processes and retry (the installed "
+            "data set is kept as it is, and the verified download is reused)")
 
 
-def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> None:
-    """Download one artifact, verify it and put it in place."""
+# Waits before retrying a rename Windows refused: a virus scanner or the
+# search indexer may hold a freshly written file for a moment.
+RENAME_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
+
+
+def _rename(src: Path, dst: Path) -> None:
+    for delay in (*RENAME_RETRY_DELAYS, None):
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+
+
+def _backup_name(target: Path) -> Path:
+    return target.with_name(f".{target.name}.old-{os.getpid()}-{time.monotonic_ns()}")
+
+
+def _remove(path: Path) -> None:
+    """Best effort: a leftover is removed by the next install (_remove_leftovers)."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _remove_leftovers(root: Path) -> None:
+    """Previous copies and unpacked staging directories an interrupted install left next to the targets."""
+    for art in ARTIFACTS:
+        target = root / art.target
+        if target.parent.is_dir():
+            for pattern in (f".{target.name}.old-*", f".{target.name}-new-*"):
+                for leftover in target.parent.glob(pattern):
+                    _remove(leftover)
+
+
+def fetch_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> Path:
+    """Download `art` into root/downloads (resuming a partial file) and check
+    its SHA-256; return the verified file. Nothing in place is touched."""
     url = f"{release_url()}/{art.name}"
     part = root / "downloads" / f"{art.name}.part"
     log.info("downloading %s (%.1f MB) from %s", art.name, art.size / 1e6, url)
@@ -296,14 +332,92 @@ def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = No
             f"{art.name}: SHA-256 mismatch (got {digest[:16]}..., expected "
             f"{art.sha256[:16]}...); the partial download was discarded, run again"
         )
+    return part
 
+
+def _stage(art: Artifact, part: Path, root: Path) -> tuple[Path, Path | None]:
+    """The verified download ready to be moved into place, and a scratch
+    directory to remove afterwards. A file is moved as it is; a tarball
+    (one top-level directory) is unpacked into a hidden directory next to
+    its target, so that moving it in is a rename on the same volume."""
+    if not art.extract:
+        return part, None
     target = root / art.target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=f".{target.name}-new-", dir=target.parent))
+    try:
+        with tarfile.open(part, "r:gz") as tar:
+            try:
+                tar.extractall(scratch, filter="data")
+            except TypeError:  # Python < 3.11.4 without the filter argument
+                tar.extractall(scratch)
+        entries = list(scratch.iterdir())
+        staged = entries[0] if len(entries) == 1 and entries[0].is_dir() else scratch
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    return staged, scratch
+
+
+def _swap_in(staged: Path, target: Path) -> Path | None:
+    """Move `staged` to `target`; return where the previous copy went (None if there was none).
+
+    Two renames and no deletion, so `target` holds the previous copy or the
+    new one, each complete, at every moment. When the previous copy cannot
+    be moved aside (another process has a file of it open) it stays where it
+    is and DataInUseError is raised; when the new one cannot be moved in,
+    the previous one is put back.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if target.exists() or target.is_symlink():
+        backup = _backup_name(target)
+        try:
+            _rename(target, backup)
+        except PermissionError as e:
+            raise DataInUseError(target, e) from e
+    try:
+        _rename(staged, target)
+    except OSError as e:
+        if backup is not None:
+            _put_back(backup, target)
+        if isinstance(e, PermissionError):
+            raise DataInUseError(target, e) from e
+        raise
+    return backup
+
+
+def _put_back(backup: Path, target: Path) -> None:
+    try:
+        _rename(backup, target)
+    except OSError as e:
+        log.error("could not move %s back to %s (%s); move it back by hand", backup, target, e)
+
+
+def _undo_swap(target: Path, staged: Path, backup: Path | None) -> None:
+    """Reverse _swap_in: the new copy back to where it was staged, the previous one back in place."""
+    try:
+        _rename(target, staged)
+    except OSError as e:
+        log.error("could not move the new %s out again (%s); the next start installs it again", target, e)
+        return
+    if backup is not None:
+        _put_back(backup, target)
+
+
+def install_artifact(art: Artifact, root: Path, progress: ProgressFn | None = None) -> None:
+    """Download one artifact, verify it and put it in place (see _swap_in)."""
+    part = fetch_artifact(art, root, progress)
+    staged, scratch = _stage(art, part, root)
+    try:
+        backup = _swap_in(staged, root / art.target)
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+    if backup is not None:
+        _remove(backup)
     if art.extract:
-        _extract_tarball(part, target)
         part.unlink(missing_ok=True)
-    else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(part, target)
 
 
 def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
@@ -332,15 +446,50 @@ def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
 
 
 def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> None:
-    """Install `todo` into `root` and write the manifest; the caller holds the install lock."""
-    for art in todo:
-        install_artifact(art, root, progress=progress)
+    """Install `todo` into `root` and write the manifest; the caller holds the install lock.
+
+    Every artifact is downloaded and verified, and the tarballs unpacked next
+    to their targets, before anything in place changes. Then each target is
+    swapped in by renames (_swap_in). When one cannot be (DataInUseError: a
+    file of the installed copy is open elsewhere), the ones already swapped
+    are swapped back, so the installed tree stays as it was, and the verified
+    downloads stay in root/downloads for the next try.
+    """
+    _remove_leftovers(root)
+    parts = [fetch_artifact(art, root, progress) for art in todo]
+    staged: list[tuple[Artifact, Path, Path | None]] = []
+    swapped: list[tuple[Path, Path, Path | None]] = []   # (target, staged copy, previous copy)
+    try:
+        for art, part in zip(todo, parts):
+            staged.append((art, *_stage(art, part, root)))
+        for art, path, _ in staged:
+            target = root / art.target
+            swapped.append((target, path, _swap_in(path, target)))
+    except BaseException:
+        for target, path, backup in reversed(swapped):
+            _undo_swap(target, path, backup)
+        raise
+    finally:
+        for _, _, scratch in staged:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
     write_manifest(root, installed=[a.name for a in todo])
     files = (read_manifest(root) or {}).get("files") or {}
     trusted = [n for n, e in files.items() if e.get("trusted")]
     if trusted:
         log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
+    for _, _, backup in swapped:
+        if backup is not None:
+            _remove(backup)
     shutil.rmtree(root / "downloads", ignore_errors=True)
+
+
+def usable_as_is(root: Path | None = None) -> bool:
+    """True when `root` holds what keyword search needs (both SQLite files),
+    whatever release they come from: the server can run on them while an
+    update waits for files in use to be closed."""
+    p = paths(root)
+    return p.api_db.is_file() and p.sdk_db.is_file()
 
 
 def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
