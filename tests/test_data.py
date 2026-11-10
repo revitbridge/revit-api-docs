@@ -103,7 +103,7 @@ def _complete_tree(root: Path) -> None:
 
 
 @pytest.mark.parametrize("text", ["[]", "null", "42", '"v1.1-data"', "{}", '{"release": 5}',
-                                  '{"files": {}}', "not json", "﻿{"])
+                                  '{"files": {}}', "not json", chr(0xFEFF) + "{"])
 def test_a_manifest_that_is_not_an_object_with_a_release_counts_as_absent(tmp_path, text):
     """A manifest.json this installer did not write (a list, null, a number, an
     object without a release name) is treated as absent: the tree is used as

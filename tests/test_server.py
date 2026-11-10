@@ -234,7 +234,7 @@ class _GbkStdout(io.TextIOWrapper):
 
 
 # Curly quotes and CJK exist in GBK; the no-break space U+00A0 does not.
-RESULT = "### “Wall.Create” 创建墙"
+RESULT = "### " + chr(0x201C) + "Wall.Create" + chr(0x201D) + chr(0xA0) + chr(0x521B) + chr(0x5EFA) + chr(0x5899)
 
 
 @pytest.mark.parametrize("command", ["search", "environment"])
