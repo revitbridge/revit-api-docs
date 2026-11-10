@@ -388,6 +388,36 @@ def test_an_upgrade_over_a_really_open_store_keeps_it(fake_release, tmp_path):
     assert p.api_db.read_bytes() == payloads["revit_api.db"] and data.missing(tmp_path) == []
 
 
+def test_a_previous_copy_that_cannot_be_removed_is_retried_and_reported(fake_release, tmp_path,
+                                                                        monkeypatch, caplog):
+    """The previous vector stores (hundreds of MB) cannot be deleted after a
+    successful upgrade (something still reads them): one more try, then one
+    log line per copy that is still there, with its path."""
+    payloads, _ = fake_release
+    _old_release_tree(tmp_path)
+    tries: dict[str, int] = {}
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        name = Path(path).name
+        if ".old-" in name:   # deleting it fails; ignore_errors=True hides that
+            tries[name.split(".old-")[0]] = tries.get(name.split(".old-")[0], 0) + 1
+            return None
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.data")
+    p = data.ensure_data(tmp_path)
+
+    assert data.read_manifest(tmp_path)["release"] == data.RELEASE_TAG
+    assert (p.chromadb_api / "chroma.sqlite3").read_bytes() == b"a"
+    assert tries == {".chromadb_api": 2, ".chromadb_code": 2}
+    left = [r.getMessage() for r in caplog.records if "could not remove" in r.getMessage()]
+    assert len(left) == 2
+    assert all(str(tmp_path / "chromadb") in m and "delete it by hand" in m for m in left)
+    assert any(".chromadb_api.old-" in m for m in left) and any(".chromadb_code.old-" in m for m in left)
+
+
 @pytest.fixture
 def offline_release(monkeypatch):
     """A release URL nothing listens on, reached without a proxy: every download fails."""

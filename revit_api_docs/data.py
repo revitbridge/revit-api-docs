@@ -307,14 +307,21 @@ def _remove(path: Path) -> None:
             pass
 
 
-def _remove_leftovers(root: Path) -> None:
-    """Previous copies and unpacked staging directories an interrupted install left next to the targets."""
+def _leftovers(root: Path) -> list[Path]:
+    """Previous copies (.<name>.old-*) and unpacked staging directories
+    (.<name>-new-*) next to the targets."""
+    found: list[Path] = []
     for art in ARTIFACTS:
         target = root / art.target
         if target.parent.is_dir():
             for pattern in (f".{target.name}.old-*", f".{target.name}-new-*"):
-                for leftover in target.parent.glob(pattern):
-                    _remove(leftover)
+                found.extend(sorted(target.parent.glob(pattern)))
+    return found
+
+
+def _remove_leftovers(root: Path) -> None:
+    for leftover in _leftovers(root):
+        _remove(leftover)
 
 
 def _restore_interrupted_swaps(root: Path) -> None:
@@ -526,6 +533,10 @@ def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> N
         if backup is not None:
             _remove(backup)
     shutil.rmtree(root / "downloads", ignore_errors=True)
+    _remove_leftovers(root)   # one more try for a previous copy something still had open
+    for leftover in _leftovers(root):
+        log.warning("could not remove %s, left over from installing the data set; delete it by hand",
+                    leftover)
 
 
 def usable_as_is(root: Path | None = None) -> bool:
