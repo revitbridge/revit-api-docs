@@ -394,12 +394,17 @@ class RAGRetriever:
         self._log = _log
 
         from .embedder.providers import create_embedding
+        reason = None
         try:
             self._embedder = create_embedding(config)
         except (KeyError, ValueError, ImportError, NotImplementedError) as e:
             # No key / unknown provider / provider not implemented (local_hf,
             # zhipu) / SDK not installed: keyword search only.
-            self._log.warning(f"embedding disabled ({e}); vector search is off, "
+            reason = str(e)
+        except Exception as e:   # anything else (a config key the provider does not take, ...)
+            reason = f"{type(e).__name__}: {e}"
+        if reason is not None:
+            self._log.warning(f"embedding disabled ({reason}); vector search is off, "
                               "keyword search on SQLite only")
             self._embedder = None
         self._config = config
@@ -775,11 +780,18 @@ class RAGRetriever:
                 api_docs.append(doc)
 
             for provider in chain:
+                nxt = "trying the next one" if provider is not chain[-1] else "keeping the retrieval order"
                 try:
                     reranked = provider.rerank(query, api_docs, top_n=final_api_n, strict=True)
                 except RerankError as e:
-                    nxt = "trying the next one" if provider is not chain[-1] else "keeping the retrieval order"
                     self._log.warning(f"[search] rerank provider {provider.name} failed ({e}); {nxt}")
+                    rerank_skipped.append(provider.name)
+                    continue
+                except Exception as e:
+                    # Not a provider's own error report: degrade the same way,
+                    # with the stack in the log so a programming error is seen.
+                    self._log.warning(f"[search] rerank provider {provider.name} failed "
+                                      f"({type(e).__name__}: {e}); {nxt}", exc_info=True)
                     rerank_skipped.append(provider.name)
                     continue
                 # Reorder api_items by rerank scores

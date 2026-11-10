@@ -228,6 +228,28 @@ def test_jev_rejects_malformed_answers(jev_key, answer):
         jev(t).rerank("q", ["a"], strict=True)
 
 
+def _undecodable_transport():
+    """HTTP 200 whose body claims gzip but is not: httpx raises DecodingError."""
+    return httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Encoding": "gzip"}, content=b"this is not gzip"))
+
+
+def test_jev_wraps_a_body_that_cannot_be_decoded(jev_key):
+    with pytest.raises(RerankError, match="DecodingError"):
+        jev(_undecodable_transport()).rerank("wall", ["a", "b"], strict=True)
+    # non-strict: the input order, as for any other failure
+    assert [x.index for x in jev(_undecodable_transport()).rerank("wall", ["a", "b"], top_n=2)] == [0, 1]
+
+
+@pytest.mark.parametrize("kind", ["jev", "cohere"])
+def test_a_query_that_cannot_be_encoded_is_a_rerank_error(jev_key, cohere_key, kind):
+    """A lone surrogate (valid in MCP's JSON, not in UTF-8) fails the request body."""
+    r = jev(jev_transport(lambda d: 0.5)) if kind == "jev" else Reranker(transport=cohere_transport([0.5]))
+    with pytest.raises(RerankError, match="UnicodeEncodeError"):
+        r.rerank("wall \ud800", ["a"], strict=True)
+    assert [x.index for x in r.rerank("wall \ud800", ["a"], top_n=1)] == [0]
+
+
 class _CountingClient(httpx.Client):
     """httpx.Client that records each construction and close (the real transport is injected)."""
 
@@ -546,6 +568,40 @@ def test_jev_failure_without_cohere_keeps_retrieval_order(tiny_dbs, tmp_path, mo
     assert res.rerank_used == "none" and res.rerank_skipped == ["jev"] and not res.abstained
     assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
     assert server.search_api(r, "Wall.Create", 3).splitlines()[0] == "Rerank: none (unavailable: jev); data set: Revit 2026"
+
+
+def test_any_rerank_failure_keeps_the_retrieval_order(tiny_dbs, tmp_path, monkeypatch, jev_key, caplog):
+    """A failure that is not an HTTP error (here an undecodable body) degrades
+    the search like a RerankError instead of failing the tool call."""
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=[jev(_undecodable_transport())])
+    plain = _retriever(tiny_dbs, tmp_path, monkeypatch, provider="none")
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    expected = plain.search("Wall.Create", api_top_k=3, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "none" and res.rerank_skipped == ["jev"]
+    assert [i.chromadb_id for i in res.api_items] == [i.chromadb_id for i in expected.api_items]
+    assert "rerank provider jev failed" in caplog.text and "DecodingError" in caplog.text
+
+
+class _BuggyProvider:
+    """A provider with a programming error: raises neither RerankError nor an HTTP error."""
+
+    name = "jev"
+    calibrated = True
+
+    def rerank(self, query, documents, top_n=15, *, strict=False):
+        raise TypeError("unsupported operand type(s)")
+
+
+def test_a_programming_error_in_a_provider_degrades_and_stays_visible(tiny_dbs, tmp_path, monkeypatch,
+                                                                     cohere_key, caplog):
+    chain = [_BuggyProvider(), Reranker(transport=cohere_transport([0.0, 0.9, 0.1]))]
+    r = _retriever(tiny_dbs, tmp_path, monkeypatch, chain=chain)
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    res = r.search("wall", api_top_k=2, code_top_k=0, rewrite=False, rerank=True)
+    assert res.rerank_used == "cohere" and res.rerank_skipped == ["jev"] and len(res.api_items) == 2
+    assert "TypeError: unsupported operand type(s)" in caplog.text
+    assert "Traceback" in caplog.text   # the stack is logged for an unexpected exception type
 
 
 def test_jev_selected_without_a_key_is_reported(tiny_dbs, tmp_path, monkeypatch):

@@ -193,6 +193,20 @@ def test_embedding_failure_degrades_to_keyword_search(keyword_only_retriever, mo
     assert _BrokenEmbedder.calls == 3
 
 
+def test_an_embedding_provider_that_cannot_be_built_degrades(tiny_dbs, monkeypatch, tmp_path, caplog):
+    """Any error building the provider (here a config key the constructor does
+    not take) leaves keyword search working instead of failing the server."""
+    api_db, sdk_db = tiny_dbs
+    monkeypatch.setenv("REVIT_API_DOCS_EMBEDDING_API_KEY", "test-embedding-key")
+    cfg = cfgmod.load_config()
+    cfg["embedding"]["models"]["openai"]["dimensions"] = 3072   # misspelt "dimension"
+    caplog.set_level(logging.WARNING, logger="revit_api_docs.retriever")
+    r = RAGRetriever(cfg, str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    assert r.vector_search_enabled is False
+    assert "embedding disabled (TypeError:" in caplog.text
+    assert r.search("Wall.Create", api_top_k=2, code_top_k=0, rewrite=False).api_items
+
+
 # -- candidate selection -------------------------------------------------------
 
 @pytest.mark.parametrize("scorer", [BM25, "like"])

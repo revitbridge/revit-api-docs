@@ -252,7 +252,7 @@ class Reranker(RerankProvider):
             raise RerankError(f"HTTP {e.response.status_code}: "
                               f"{e.response.text[:200]}") from e
         except Exception as e:
-            raise RerankError(f"failed ({e})") from e
+            raise RerankError(f"failed ({type(e).__name__}: {e})") from e
 
         results.sort(key=lambda r: r.score, reverse=True)
         elapsed = time.monotonic() - t0
@@ -376,9 +376,22 @@ class JevReranker(RerankProvider):
         return results[:max(0, top_n)]
 
     def score(self, query: str, documents: list[str]) -> list[float]:
-        """Probability per document, in input order. Raises RerankError."""
+        """Probability per document, in input order. Raises RerankError, whatever failed."""
         if not self._api_key:
             raise RerankError(f"no API key ({self._api_key_env})")
+        try:
+            return self._score(query, documents)
+        except RerankError:
+            raise
+        except (httpx.HTTPError, ValueError) as e:
+            # An undecodable body (DecodingError), a query that is not valid
+            # UTF-8 (UnicodeEncodeError), an unusable proxy URL (ValueError).
+            raise RerankError(f"{type(e).__name__}: {e}") from e
+        except Exception as e:
+            _log.warning(f"[rerank:jev] unexpected {type(e).__name__}", exc_info=True)
+            raise RerankError(f"unexpected {type(e).__name__}: {e}") from e
+
+    def _score(self, query: str, documents: list[str]) -> list[float]:
         q = self.query_text(query)
         bs = self._batch_size
         batches = [documents[i:i + bs] for i in range(0, len(documents), bs)]
