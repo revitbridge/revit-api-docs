@@ -26,9 +26,14 @@ copy can be pointed at directly):
     chromadb/chromadb_api/
     chromadb/chromadb_code/
     manifest.json
+
+While installing, the directory also holds downloads/ (partial and verified
+downloads, removed afterwards) and .install.lock (kept; see install_lock).
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -40,9 +45,14 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 import httpx
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 log = logging.getLogger("revit_api_docs.data")
 
@@ -53,6 +63,12 @@ RELEASE_TAG = "v1.1-data"
 RELEASE_URL = f"https://github.com/revitbridge/revit-api-docs/releases/download/{RELEASE_TAG}"
 
 ProgressFn = Callable[[str, int, int], None]
+# Called while another process holds the install lock: (file it is
+# downloading or None, bytes it has so far, size of that file).
+WaitFn = Callable[[str | None, int, int], None]
+
+LOCK_FILENAME = ".install.lock"
+LOCK_POLL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -315,6 +331,18 @@ def describe_artifact(root: Path, art: Artifact, installed: bool) -> dict:
     return entry
 
 
+def _install(root: Path, todo: list[Artifact], progress: ProgressFn | None) -> None:
+    """Install `todo` into `root` and write the manifest; the caller holds the install lock."""
+    for art in todo:
+        install_artifact(art, root, progress=progress)
+    write_manifest(root, installed=[a.name for a in todo])
+    files = (read_manifest(root) or {}).get("files") or {}
+    trusted = [n for n, e in files.items() if e.get("trusted")]
+    if trusted:
+        log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
+    shutil.rmtree(root / "downloads", ignore_errors=True)
+
+
 def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
     """Record the tree under `root`; `installed` names the artifacts this run
     downloaded and verified (see describe_artifact for the rest)."""
@@ -329,8 +357,112 @@ def write_manifest(root: Path, installed: Iterable[str] = ()) -> None:
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
-def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) -> DataPaths:
-    """Make sure every artifact is installed under `root`; return its paths."""
+if sys.platform == "win32":
+    def _try_lock(fd: int) -> bool | None:
+        """True: locked; False: another handle holds it; None: locking not possible here."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # first byte; locking past the end is allowed
+        except OSError as e:
+            return False if e.errno in (errno.EACCES, errno.EDEADLK) else None
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+else:
+    def _try_lock(fd: int) -> bool | None:
+        """True: locked; False: another handle holds it; None: locking not possible here."""
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            return False if e.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK) else None
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _other_install_progress(root: Path) -> tuple[str | None, int, int]:
+    """The download another process is writing: the .part written last, as
+    (artifact name, bytes so far, artifact size); (None, 0, 0) when none is."""
+    sizes = {a.name: a.size for a in ARTIFACTS}
+    latest: tuple[float, str, int] | None = None
+    try:
+        parts = list((root / "downloads").glob("*.part"))
+    except OSError:
+        parts = []
+    for part in parts:
+        name = part.name[:-len(".part")]
+        try:
+            st = part.stat()
+        except OSError:
+            continue
+        if name in sizes and (latest is None or st.st_mtime > latest[0]):
+            latest = (st.st_mtime, name, st.st_size)
+    if latest is None:
+        return None, 0, 0
+    return latest[1], min(latest[2], sizes[latest[1]]), sizes[latest[1]]
+
+
+@contextlib.contextmanager
+def install_lock(root: Path, waiting: WaitFn | None = None,
+                 poll: float = LOCK_POLL_SECONDS) -> Iterator[bool]:
+    """Hold the install lock of the data directory `root` for the block.
+
+    While another process holds it this waits (logging once, and calling
+    `waiting` about every `poll` seconds with that process's download). The
+    lock is the operating system's, on root/.install.lock (LockFile on
+    Windows, flock elsewhere): it is released when the holding process ends,
+    however it ends, so a crashed install never blocks the next one. The
+    file stays (removing it would race with a process about to lock it).
+    Where the file cannot be opened or locked the block runs unlocked, with
+    a warning. Yields True when the lock is held.
+    """
+    path = Path(root) / LOCK_FILENAME
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        log.warning("cannot open %s (%s); installing without the lock", path, e)
+        yield False
+        return
+    locked = False
+    try:
+        announced = False
+        while True:
+            state = _try_lock(fd)
+            if state is None:
+                log.warning("cannot lock %s; installing without the lock", path)
+                break
+            if state:
+                locked = True
+                break
+            if not announced:
+                announced = True
+                log.warning("another revit-api-docs process is installing the data set in %s; "
+                            "waiting for it to finish", root)
+            if waiting is not None:
+                waiting(*_other_install_progress(Path(root)))
+            time.sleep(poll)
+        yield locked
+    finally:
+        if locked:
+            try:
+                _unlock(fd)
+            except OSError:
+                pass   # closing the descriptor releases it as well
+        os.close(fd)
+
+
+def ensure_data(root: Path | None = None, progress: ProgressFn | None = None,
+                waiting: WaitFn | None = None) -> DataPaths:
+    """Make sure every artifact is installed under `root`; return its paths.
+
+    The install runs under the directory's install lock (install_lock). A
+    process that finds the data set missing while another installs it waits
+    (`waiting` is called meanwhile), then finds it installed and downloads
+    nothing; the waiting process never writes to the directory.
+    """
     p = paths(root)
     todo = missing(p.root)
     for art, size in unexpected_sizes(p.root):
@@ -338,14 +470,12 @@ def ensure_data(root: Path | None = None, progress: ProgressFn | None = None) ->
                     "(delete it to re-download)", p.root / art.target, size, RELEASE_TAG, art.size)
     if todo:
         p.root.mkdir(parents=True, exist_ok=True)
-        for art in todo:
-            install_artifact(art, p.root, progress=progress)
-        write_manifest(p.root, installed=[a.name for a in todo])
-        files = (read_manifest(p.root) or {}).get("files") or {}
-        trusted = [n for n, e in files.items() if e.get("trusted")]
-        if trusted:
-            log.warning("manifest written with unverified pre-existing files: %s", ", ".join(trusted))
-        shutil.rmtree(p.root / "downloads", ignore_errors=True)
+        with install_lock(p.root, waiting=waiting):
+            todo = missing(p.root)   # another process may have installed it while this one waited
+            if todo:
+                _install(p.root, todo, progress)
+            else:
+                log.info("data set installed by another process in %s", p.root)
     elif read_manifest(p.root) is None:
         log.info("using existing data in %s (no manifest)", p.root)
     return p

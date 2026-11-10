@@ -98,6 +98,14 @@ class _State:
         self.detail = f"{name} {pct}%"
         data.stderr_progress(name, done, total)
 
+    def _waiting(self, name: str | None, done: int, total: int) -> None:
+        """Another process holds the install lock; this one reports its download."""
+        if name:
+            pct = 100 * done // total if total else 0
+            self.detail = f"{name} {pct}%, in another revit-api-docs process"
+        else:
+            self.detail = "in another revit-api-docs process"
+
     def prepare(self) -> RAGRetriever:
         """Blocking: install the data set if needed and build the retriever."""
         with self.lock:
@@ -105,7 +113,7 @@ class _State:
                 return self.retriever
             try:
                 self.status = "downloading" if data.missing() else "loading"
-                paths = data.ensure_data(progress=self._progress)
+                paths = data.ensure_data(progress=self._progress, waiting=self._waiting)
                 self.status = "loading"
                 from revit_api_docs.retriever import RAGRetriever
 
