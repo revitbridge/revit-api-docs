@@ -12,6 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+        with:
+          # One of the versions ci.yml tests, so a release never runs on an
+          # interpreter the pull requests did not cover.
+          python-version: "3.13"
       - name: Tag must match the package version
         run: |
           expected="v$(uv version --short)"
