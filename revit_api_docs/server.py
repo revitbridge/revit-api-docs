@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 log = logging.getLogger("revit_api_docs.server")
 
 MAX_TOP_K = 50
+# Longer queries are refused with a message: API names and task descriptions
+# are far shorter, and every step (keyword search, embedding, rerank, logs)
+# grows with the query.
+MAX_QUERY_CHARS = 2000
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8765
 
@@ -199,12 +203,22 @@ def rerank_line(results, revit_version: str) -> str:
     return f"Rerank: {rerank_label(results)}; data set: Revit {revit_version}"
 
 
+def _query_too_long(query: str) -> str | None:
+    """The tool reply for a query over MAX_QUERY_CHARS, else None."""
+    if len(query) <= MAX_QUERY_CHARS:
+        return None
+    return (f"The query is {len(query):,} characters long; the limit is {MAX_QUERY_CHARS:,}. "
+            "Ask with an API name or a short task description.")
+
+
 def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
+    from revit_api_docs.retriever import quote_query
+
     results = retriever.search(query, api_top_k=top_k, code_top_k=0, rewrite=False, rerank=True)
     ctx = retriever.build_context(results)
     api_context = ctx.get("api_context")
     if not api_context:
-        return _with_environment_notes(f"No API entries found for {query!r}.", query)
+        return _with_environment_notes(f"No API entries found for {quote_query(query)}.", query)
     head = [rerank_line(results, retriever.revit_version)]
     if results.abstained:
         head = [abstention_line(retriever.revit_version, results.abstain_reason),
@@ -213,9 +227,11 @@ def search_api(retriever: RAGRetriever, query: str, top_k: int) -> str:
 
 
 def search_examples(retriever: RAGRetriever, query: str, top_k: int) -> str:
+    from revit_api_docs.retriever import quote_query
+
     results = retriever.search(query, api_top_k=0, code_top_k=top_k, rewrite=False, rerank=False)
     ctx = retriever.build_context(results)
-    return ctx.get("code_context") or f"No SDK examples found for {query!r}."
+    return ctx.get("code_context") or f"No SDK examples found for {quote_query(query)}."
 
 
 # -- Tools ---------------------------------------------------------------------
@@ -236,6 +252,9 @@ async def search_revit_api(query: str, top_k: int = 10) -> str:
     add-in") also get curated environment notes. top_k: 1-50, default 10."""
     if not query or not query.strip():
         return "Give a query: an API name such as 'Wall.Create' or a short task description."
+    too_long = _query_too_long(query.strip())
+    if too_long:
+        return too_long
     msg = _state.message_if_not_ready()
     if msg:
         return _with_environment_notes(msg, query.strip())
@@ -251,6 +270,9 @@ async def get_code_examples(query: str, top_k: int = 3) -> str:
     and their summaries are English only. top_k: 1-50, default 3."""
     if not query or not query.strip():
         return "Give a query: an API name or the task the sample should show."
+    too_long = _query_too_long(query.strip())
+    if too_long:
+        return too_long
     msg = _state.message_if_not_ready()
     if msg:
         return msg

@@ -119,6 +119,44 @@ def test_search_helpers_use_keyword_mode(tiny_dbs, monkeypatch, tmp_path):
 
 
 
+@pytest.mark.parametrize("scorer", ["bm25", "like"])
+def test_a_long_query_is_cut_in_replies_and_logs(tiny_dbs, monkeypatch, tmp_path, caplog, scorer):
+    """The query is echoed in "No ... found" replies and logged at INFO; both
+    keep a short prefix with an ASCII marker, whatever its length."""
+    from revit_api_docs.config import load_config
+    from revit_api_docs.retriever import RAGRetriever
+
+    for name in ("REVIT_API_DOCS_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "COHERE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    api_db, sdk_db = tiny_dbs
+    r = RAGRetriever(load_config(), str(api_db), str(sdk_db), str(tmp_path / "a"), str(tmp_path / "b"))
+    if scorer == "like":
+        r._bm25 = None
+    query = " ".join(f"qq{i:04d}" for i in range(330))   # 2,309 characters, no match
+    caplog.set_level(logging.INFO)
+    text = server.search_api(r, query, 5)
+    assert text.startswith("No API entries found for 'qq0000 qq0001") and len(text) < 200
+    assert f"... ({len(query)} characters)." in text and text.isascii()
+    text = server.search_examples(r, query, 2)
+    assert text.startswith("No SDK examples found for 'qq0000") and len(text) < 200
+    assert max(len(rec.getMessage()) for rec in caplog.records) < 600
+
+
+def test_an_overlong_query_gets_a_clear_message(monkeypatch):
+    st = server._State()
+    started = []
+    monkeypatch.setattr(st, "start_background", lambda: started.append(1))
+    monkeypatch.setattr(server, "_state", st)
+    st.status = "downloading"
+    for tool in (server.search_revit_api, server.get_code_examples):
+        msg = asyncio.run(tool("Wall.Create " + "x" * 400_000))
+        assert msg == ("The query is 400,012 characters long; the limit is 2,000. Ask with an API "
+                       "name or a short task description.")
+    assert started == []   # nothing was searched or started
+    assert server.MAX_QUERY_CHARS == 2000
+    assert "downloading" in asyncio.run(server.search_revit_api("w" * 2000))   # the limit itself is accepted
+
+
 def test_the_first_line_names_the_data_set_of_the_retriever(tiny_dbs, monkeypatch, tmp_path):
     """The data set version on the Rerank line is the retriever's revit_version (config)."""
     from revit_api_docs.config import load_config

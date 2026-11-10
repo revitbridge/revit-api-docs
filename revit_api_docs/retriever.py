@@ -93,6 +93,18 @@ from .bm25 import Bm25Index, fts5_available
 from .prompts import load_prompt
 
 
+# A query is echoed in replies and log lines with at most this many characters.
+QUERY_ECHO_CHARS = 80
+
+
+def quote_query(query: str, limit: int = QUERY_ECHO_CHARS) -> str:
+    """repr(query) for a reply or a log line, cut after `limit` characters
+    with an ASCII marker that gives the full length."""
+    if len(query) <= limit:
+        return repr(query)
+    return f"{query[:limit]!r}... ({len(query)} characters)"
+
+
 def _escape_like(s: str) -> str:
     """Escape LIKE wildcards % and _ (used with ESCAPE '\\'); the backslash itself too."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -1274,7 +1286,7 @@ class RAGRetriever:
         """
         hits = self._bm25.search(query, limit)
         if not hits:
-            self._log.info(f"[keyword_search] bm25 query={query!r} found=0")
+            self._log.info(f"[keyword_search] bm25 query={quote_query(query)} found=0")
             return []
         ids = [rowid for rowid, _ in hits]
         conn = sqlite3.connect(self._api_db)
@@ -1308,7 +1320,7 @@ class RAGRetriever:
                 parameters=r["parameters"] or "",
                 remark=r["remark"] or "",
             ))
-        self._log.info(f"[keyword_search] bm25 query={query!r} found={len(items)} top3={top3}")
+        self._log.info(f"[keyword_search] bm25 query={quote_query(query)} found={len(items)} top3={top3}")
         return items
 
     def _like_search_api(self, query: str, limit: int = 15) -> list[RetrievedItem]:
@@ -1407,8 +1419,10 @@ class RAGRetriever:
                 parameters=r["parameters"] or "",
                 remark=r["remark"] or "",
             ))
-        self._log.info(f"[keyword_search] query={query!r} "
-                       f"tokens={[(t, f'{w:.1f}') for t, w in weighted_tokens]} "
+        shown = [(t, f'{w:.1f}') for t, w in weighted_tokens[:10]]
+        more = f" +{len(weighted_tokens) - 10} more" if len(weighted_tokens) > 10 else ""
+        self._log.info(f"[keyword_search] query={quote_query(query)} "
+                       f"tokens={shown}{more} "
                        f"found={len(items)} "
                        f"top3={[(s[1]['name'][:50], f'{s[0]:.1f}') for s in scored[:3]]}")
         return items
@@ -1476,7 +1490,7 @@ class RAGRetriever:
                 content=r["content"] or "",
                 mentioned_apis=r["mentioned_apis"] or "",
             ))
-        self._log.info(f"[keyword_search_sdk] query={query!r} found={len(items)}")
+        self._log.info(f"[keyword_search_sdk] query={quote_query(query)} found={len(items)}")
         return items
 
     # ------------------------------------------------------------------
